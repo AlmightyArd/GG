@@ -7,7 +7,7 @@ local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
 local VERSION = "v2.5.5"
-local FOOTER = "Garden Tower Defense | Ard Hub by Ardhi | " .. VERSION
+local FOOTER = "Garden Tower Defense | Ard Hub | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/config.json"
 local TOGGLE_KEY = Enum.KeyCode.RightControl
@@ -1955,7 +1955,7 @@ do
                 { name = "Session", value = table.concat(sessionLines, "\n"), inline = true },
                 { name = "Account", value = table.concat(accountLines, "\n"), inline = false },
             },
-            footer = { text = "Ard Hub by Ardhi • " .. VERSION },
+            footer = { text = "Ard Hub • " .. VERSION },
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         }
     end
@@ -2006,7 +2006,7 @@ do
                 }, "\n"), inline = true },
                 { name = "Account", value = accountText(), inline = false },
             },
-            footer = { text = "Ard Hub by Ardhi • " .. VERSION },
+            footer = { text = "Ard Hub by  • " .. VERSION },
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         }
     end
@@ -2021,7 +2021,7 @@ do
                     .. fmtTime(os.time() - Session.startedAt), inline = true },
                 { name = "Account", value = accountText(), inline = false },
             },
-            footer = { text = "Ard Hub by Ardhi • " .. VERSION },
+            footer = { text = "Ard Hub by  • " .. VERSION },
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         }
     end
