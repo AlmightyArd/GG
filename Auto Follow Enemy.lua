@@ -340,8 +340,7 @@ local function setEnabled(state)
     if not state then
         currentTarget = nil
         resetCamera()
-        local _, hum = getRoot()
-        local root = getRoot()
+        local root, hum = getRoot()
         if hum and root then hum:MoveTo(root.Position) end -- berhenti jalan
     end
     refreshUI()
@@ -354,160 +353,57 @@ table.insert(connections, UserInputService.InputBegan:Connect(function(input, pr
 end))
 
 ---------------------------------------------------------------------
--- UI
+-- UI (simple: satu tombol toggle, bisa digeser)
 ---------------------------------------------------------------------
 if env.__AutoFollowEnemyGui then
     pcall(function() env.__AutoFollowEnemyGui:Destroy() end)
 end
 
-local TARGET_MODES = { "First", "Last", "Nearest", "Weakest", "Strongest" }
-local FOLLOW_MODES = { "Walk", "Teleport", "Camera" }
-
-local function nextIn(list, current)
-    local i = table.find(list, current) or 0
-    return list[i % #list + 1]
-end
-
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoFollowEnemy"
 gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.DisplayOrder = 999
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 99999
+gui.Enabled = true
 env.__AutoFollowEnemyGui = gui
 
-do
-    local ok = pcall(function()
-        gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
-    end)
-    if not ok or not gui.Parent then
-        gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-    end
+-- PlayerGui dulu (paling pasti tampil), baru gethui / CoreGui sebagai cadangan
+local function tryParent(getParent)
+    local ok = pcall(function() gui.Parent = getParent() end)
+    return ok and gui.Parent ~= nil
 end
+local parented = tryParent(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end)
+    or tryParent(function() return gethui() end)
+    or tryParent(function() return game:GetService("CoreGui") end)
 
-local function corner(inst, radius)
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, radius or 6)
-    c.Parent = inst
-end
-
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(210, 178)
-frame.Position = UDim2.new(0, 20, 0.5, -89)
-frame.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-frame.BorderSizePixel = 0
-frame.Active = true
-frame.Parent = gui
-corner(frame, 8)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -40, 0, 30)
-title.Position = UDim2.fromOffset(10, 0)
-title.BackgroundTransparency = 1
-title.Font = Enum.Font.GothamBold
-title.TextSize = 14
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.TextColor3 = Color3.fromRGB(235, 235, 240)
-title.Text = "Auto Follow Enemy"
-title.Parent = frame
-
-local minimize = Instance.new("TextButton")
-minimize.Size = UDim2.fromOffset(24, 22)
-minimize.Position = UDim2.new(1, -30, 0, 4)
-minimize.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
-minimize.BorderSizePixel = 0
-minimize.Font = Enum.Font.GothamBold
-minimize.TextSize = 14
-minimize.TextColor3 = Color3.fromRGB(235, 235, 240)
-minimize.Text = "-"
-minimize.AutoButtonColor = true
-minimize.Parent = frame
-corner(minimize, 4)
-
-local body = Instance.new("Frame")
-body.Size = UDim2.new(1, -20, 1, -40)
-body.Position = UDim2.fromOffset(10, 34)
-body.BackgroundTransparency = 1
-body.Parent = frame
-
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 6)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = body
-
-local function makeButton(order)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, 0, 0, 30)
-    b.LayoutOrder = order
-    b.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
-    b.BorderSizePixel = 0
-    b.Font = Enum.Font.GothamMedium
-    b.TextSize = 13
-    b.TextColor3 = Color3.fromRGB(235, 235, 240)
-    b.AutoButtonColor = true
-    b.Parent = body
-    corner(b, 6)
-    return b
-end
-
-local toggleBtn = makeButton(1)
-local targetBtn = makeButton(2)
-local modeBtn   = makeButton(3)
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, 0, 0, 24)
-status.LayoutOrder = 4
-status.BackgroundTransparency = 1
-status.Font = Enum.Font.Gotham
-status.TextSize = 12
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.TextTruncate = Enum.TextTruncate.AtEnd
-status.TextColor3 = Color3.fromRGB(160, 160, 170)
-status.Text = "Musuh: 0"
-status.Parent = body
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "Toggle"
+toggleBtn.Size = UDim2.fromOffset(170, 40)
+toggleBtn.Position = UDim2.new(0, 20, 0.4, 0)
+toggleBtn.BorderSizePixel = 0
+toggleBtn.AutoButtonColor = false
+toggleBtn.Font = Enum.Font.SourceSansBold
+toggleBtn.TextSize = 20
+toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleBtn.ZIndex = 10
+toggleBtn.Parent = gui
 
 refreshUI = function()
-    toggleBtn.Text = CONFIG.Enabled and "Follow: ON" or "Follow: OFF"
+    toggleBtn.Text = CONFIG.Enabled and "Auto Follow: ON" or "Auto Follow: OFF"
     toggleBtn.BackgroundColor3 = CONFIG.Enabled
         and Color3.fromRGB(46, 160, 90)
         or  Color3.fromRGB(170, 60, 60)
-    targetBtn.Text = "Target: " .. CONFIG.TargetMode
-    modeBtn.Text   = "Mode: " .. CONFIG.FollowMode
 end
 refreshUI()
 
-toggleBtn.MouseButton1Click:Connect(function()
-    setEnabled(not CONFIG.Enabled)
-end)
-
-targetBtn.MouseButton1Click:Connect(function()
-    CONFIG.TargetMode = nextIn(TARGET_MODES, CONFIG.TargetMode)
-    refreshUI()
-end)
-
-modeBtn.MouseButton1Click:Connect(function()
-    if CONFIG.FollowMode == "Camera" then resetCamera() end
-    CONFIG.FollowMode = nextIn(FOLLOW_MODES, CONFIG.FollowMode)
-    refreshUI()
-end)
-
-local minimized = false
-minimize.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    body.Visible = not minimized
-    frame.Size = minimized and UDim2.fromOffset(210, 30) or UDim2.fromOffset(210, 178)
-    minimize.Text = minimized and "+" or "-"
-end)
-
--- drag (mouse & touch)
+-- klik = toggle, tahan lalu geser = pindahkan tombol
 do
-    local dragging, dragStart, startPos
-    frame.InputBegan:Connect(function(input)
+    local dragging, moved, dragStart, startPos
+    toggleBtn.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, input.Position, frame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
+            dragging, moved = true, false
+            dragStart, startPos = input.Position, toggleBtn.Position
         end
     end)
     table.insert(connections, UserInputService.InputChanged:Connect(function(input)
@@ -515,28 +411,24 @@ do
         if input.UserInputType == Enum.UserInputType.MouseMovement
             or input.UserInputType == Enum.UserInputType.Touch then
             local delta = input.Position - dragStart
-            frame.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            if delta.Magnitude > 6 then moved = true end
+            if moved then
+                toggleBtn.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end
+    end))
+    table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            if not moved then setEnabled(not CONFIG.Enabled) end
         end
     end))
 end
 
--- status: jumlah musuh + target saat ini
-task.spawn(function()
-    while gui.Parent do
-        local count = 0
-        for _ in pairs(Enemies) do count += 1 end
-        local t = currentTarget
-        if CONFIG.Enabled and t and Enemies[t.ID] then
-            status.Text = ("Musuh: %d | %s #%d (%d HP)"):format(
-                count, t.Name:gsub("^" .. CONFIG.NamePrefix, ""), t.ID, math.floor(t.Health))
-        else
-            status.Text = ("Musuh: %d"):format(count)
-        end
-        task.wait(0.25)
-    end
-end)
-
+print("[AutoFollow] UI v2: " .. (parented and gui:GetFullName() or "GAGAL dipasang"))
 print(("[AutoFollow] Loaded. Mode=%s, Target=%s, Toggle=%s"):format(
     CONFIG.FollowMode, CONFIG.TargetMode, CONFIG.ToggleKey.Name))
