@@ -77,6 +77,75 @@ end
 -- Enemies[id] = { ID, Name, Context, Speed, Health, MaxHealth, PathIndex,
 --                 Distance, LastSync, SpawnCF, Model }
 local Enemies = {}
+local Ignored = {}      -- ID yang sengaja difilter (prefix / team)
+local ExistingById = {} -- model yang sudah ada sebelum script jalan (kalau bisa dikenali)
+local Paths = {}        -- jalur yang dipelajari: Paths[key] = { {d = jarak, p = Vector3}, ... }
+local seenContexts = {}
+local announced = {}
+
+local function once(key, ...)
+    if announced[key] then return end
+    announced[key] = true
+    print("[AutoFollow]", ...)
+end
+
+-- Jalur dipelajari dari musuh yang modelnya ketemu: (jarak tempuh -> posisi).
+-- Setelah itu posisi musuh lain bisa dihitung dari jarak tempuhnya saja.
+local function pathFor(enemy, create)
+    local ctx = typeof(enemy.Context) == "Instance" and enemy.Context.Name or "?"
+    local key = ctx .. ":" .. tostring(enemy.PathIndex or 1)
+    local path = Paths[key]
+    if not path and create then
+        path = {}
+        Paths[key] = path
+    end
+    return path
+end
+
+local function recordPath(enemy)
+    local m = enemy.Model
+    if not (m and m.Parent) then return end
+    local ok, pivot = pcall(m.GetPivot, m)
+    if not ok then return end
+    local path = pathFor(enemy, true)
+    local last = path[#path]
+    if not last or enemy.Distance > last.d + 0.5 then
+        path[#path + 1] = { d = enemy.Distance, p = pivot.Position }
+    end
+end
+
+local function pathPosition(enemy, dist)
+    local path = pathFor(enemy, false)
+    if not path or #path == 0 then return nil end
+    if dist <= path[1].d then return path[1].p end
+    if dist > path[#path].d then return nil end -- bagian jalur ini belum dipelajari
+    local lo, hi = 1, #path
+    while hi - lo > 1 do
+        local mid = math.floor((lo + hi) / 2)
+        if path[mid].d <= dist then lo = mid else hi = mid end
+    end
+    local a, b = path[lo], path[hi]
+    local t = (dist - a.d) / math.max(b.d - a.d, 1e-6)
+    return a.p:Lerp(b.p, t)
+end
+
+-- Dijalankan sekali per context: cetak isinya (untuk diagnosa) dan
+-- catat model yang bisa dikenali lewat nama angka / attribute ID.
+local function inspectContext(context)
+    if typeof(context) ~= "Instance" or seenContexts[context] then return end
+    seenContexts[context] = true
+    print("[AutoFollow] Context: " .. context:GetFullName())
+    for i, child in ipairs(context:GetChildren()) do
+        if i > 25 then print("   ...") break end
+        print(("   %s [%s] anak=%d"):format(child.Name, child.ClassName, #child:GetChildren()))
+    end
+    for _, inst in ipairs(context:GetDescendants()) do
+        if inst:IsA("Model") then
+            local id = inst:GetAttribute("ID") or inst:GetAttribute("EntityID") or tonumber(inst.Name)
+            if type(id) == "number" then ExistingById[id] = inst end
+        end
+    end
+end
 
 local function contextAllowed(context)
     if not CONFIG.OnlyContext then return true end
@@ -137,13 +206,13 @@ local function findModelFor(enemy)
         if best then
             best.claimed = true
             enemy.Model = best.model
-            log("Model ditemukan untuk ID", enemy.ID, best.model:GetFullName())
+            once("found", "Model musuh ketemu, contoh: " .. best.model:GetFullName())
             pruneRecent()
             return
         end
         task.wait(0.1)
     end
-    log("Model TIDAK ditemukan untuk ID", enemy.ID)
+    once("notfound", "PERINGATAN: model untuk musuh ID " .. enemy.ID .. " (" .. enemy.Name .. ") tidak ketemu di workspace")
     pruneRecent()
 end
 
@@ -159,9 +228,15 @@ end
 
 table.insert(connections, Remotes:WaitForChild("CreateEntity").OnClientEvent:Connect(function(context, name, data)
     if type(name) ~= "string" or type(data) ~= "table" or not data.ID then return end
-    if name:sub(1, #CONFIG.NamePrefix) ~= CONFIG.NamePrefix then return end
-    if CONFIG.TeamIndex and data.TeamIndex ~= CONFIG.TeamIndex then return end
     if not contextAllowed(context) then return end
+    if name:sub(1, #CONFIG.NamePrefix) ~= CONFIG.NamePrefix
+        or (CONFIG.TeamIndex and data.TeamIndex ~= CONFIG.TeamIndex) then
+        Ignored[data.ID] = true
+        Enemies[data.ID] = nil
+        return
+    end
+    Ignored[data.ID] = nil
+    inspectContext(context)
 
     local enemy = {
         ID        = data.ID,
@@ -178,18 +253,39 @@ table.insert(connections, Remotes:WaitForChild("CreateEntity").OnClientEvent:Con
     }
     Enemies[enemy.ID] = enemy
     log("Spawn", name, enemy.ID)
+    if typeof(data.CF) == "CFrame" then -- titik spawn = awal jalur
+        local path = pathFor(enemy, true)
+        if #path == 0 then path[1] = { d = enemy.Distance, p = data.CF.Position } end
+    end
     task.spawn(findModelFor, enemy)
 end))
 
 -- buffer: [u32 ID][f32 Distance] berulang
-table.insert(connections, Remotes:WaitForChild("EnemyDistanceSync").OnClientEvent:Connect(function(_, buf)
+table.insert(connections, Remotes:WaitForChild("EnemyDistanceSync").OnClientEvent:Connect(function(context, buf)
     if typeof(buf) ~= "buffer" then return end
+    if not contextAllowed(context) then return end
+    inspectContext(context)
     local now = os.clock()
     for offset = 0, buffer.len(buf) - 8, 8 do
-        local enemy = Enemies[buffer.readu32(buf, offset)]
+        local id = buffer.readu32(buf, offset)
+        local dist = buffer.readf32(buf, offset + 4)
+        local enemy = Enemies[id]
         if enemy then
-            enemy.Distance = buffer.readf32(buf, offset + 4)
+            local dt = now - enemy.LastSync
+            if enemy.Placeholder and dt > 0.05 and dist > enemy.Distance then
+                enemy.Speed = (dist - enemy.Distance) / dt -- speed tidak diketahui, hitung sendiri
+            end
+            enemy.Distance = dist
             enemy.LastSync = now
+            recordPath(enemy)
+        elseif not Ignored[id] then
+            -- musuh yang sudah spawn sebelum script dijalankan (CreateEntity terlewat)
+            Enemies[id] = {
+                ID = id, Name = CONFIG.NamePrefix .. "unknown", Context = context,
+                Speed = 0, Health = 0, MaxHealth = 0, PathIndex = nil,
+                Distance = dist, LastSync = now,
+                Model = ExistingById[id], Placeholder = true,
+            }
         end
     end
 end))
@@ -236,7 +332,8 @@ local function enemyPosition(enemy)
         local ok, pivot = pcall(m.GetPivot, m)
         if ok then return pivot.Position end
     end
-    return nil
+    -- tidak ada model: hitung dari jarak tempuh di jalur yang sudah dipelajari
+    return pathPosition(enemy, estimatedDistance(enemy))
 end
 
 local function getRoot()
@@ -247,7 +344,11 @@ end
 local function pickTarget()
     local root = getRoot()
     local best, bestScore
-    for _, enemy in pairs(Enemies) do
+    for id, enemy in pairs(Enemies) do
+        if enemy.Placeholder and os.clock() - enemy.LastSync > 10 then
+            Enemies[id] = nil -- tidak ada sync lagi, anggap sudah hilang
+            continue
+        end
         local pos = enemyPosition(enemy)
         if pos then
             local score
@@ -378,18 +479,24 @@ local parented = tryParent(function() return LocalPlayer:WaitForChild("PlayerGui
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Name = "Toggle"
-toggleBtn.Size = UDim2.fromOffset(170, 40)
+toggleBtn.Size = UDim2.fromOffset(180, 50)
 toggleBtn.Position = UDim2.new(0, 20, 0.4, 0)
 toggleBtn.BorderSizePixel = 0
 toggleBtn.AutoButtonColor = false
 toggleBtn.Font = Enum.Font.SourceSansBold
-toggleBtn.TextSize = 20
+toggleBtn.TextSize = 16
 toggleBtn.TextColor3 = Color3.new(1, 1, 1)
 toggleBtn.ZIndex = 10
 toggleBtn.Parent = gui
 
 refreshUI = function()
-    toggleBtn.Text = CONFIG.Enabled and "Auto Follow: ON" or "Auto Follow: OFF"
+    local total, located = 0, 0
+    for _, enemy in pairs(Enemies) do
+        total += 1
+        if enemyPosition(enemy) then located += 1 end
+    end
+    toggleBtn.Text = ("Auto Follow: %s\nMusuh %d | Posisi ketemu %d"):format(
+        CONFIG.Enabled and "ON" or "OFF", total, located)
     toggleBtn.BackgroundColor3 = CONFIG.Enabled
         and Color3.fromRGB(46, 160, 90)
         or  Color3.fromRGB(170, 60, 60)
@@ -429,6 +536,13 @@ do
     end))
 end
 
-print("[AutoFollow] UI v2: " .. (parented and gui:GetFullName() or "GAGAL dipasang"))
+task.spawn(function()
+    while gui.Parent do
+        refreshUI()
+        task.wait(0.5)
+    end
+end)
+
+print("[AutoFollow] UI v3: " .. (parented and gui:GetFullName() or "GAGAL dipasang"))
 print(("[AutoFollow] Loaded. Mode=%s, Target=%s, Toggle=%s"):format(
     CONFIG.FollowMode, CONFIG.TargetMode, CONFIG.ToggleKey.Name))
