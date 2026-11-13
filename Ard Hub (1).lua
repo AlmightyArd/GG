@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v2.7.2"
+local VERSION = "v2.7.3"
 local FOOTER = "Garden Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/config.json"
@@ -32,7 +32,7 @@ local ICONS = {
     ["Webhook"] = "🔔",
     ["Summon"] = "🎁",
     ["Auto Summon"] = "🎁",
-    ["Jaga Saldo"] = "💰",
+    ["Currency"] = "💰",
     ["Match"] = "⚔",
     ["Player"] = "👤",
     ["Performance"] = "⚡",
@@ -4595,23 +4595,63 @@ end), "toggle")
 ;(function()
     local SUMMON_REMOTE = "BuyUnitBox"
     local KNOWN_CRATES = { "ub_classic", "ub_space", "ub_volcano", "ub_halloween26" }
-    -- Jumlah "Multi" per crate (bawaan 10). Crate event Halloween memakai 13.
+    -- Nama tampilan crate. Yang tidak ada di sini dicari dari game, lalu dari ID (ub_space -> "Space Summon").
+    local CRATE_NAMES = {
+        ub_halloween26 = "Skull Summon",
+    }
+    -- Jumlah "Multi" per crate (bawaan 10). Skull Summon (Halloween) memakai 13.
     local MULTI_AMOUNT = { ub_halloween26 = 13 }
     -- Mata uang per crate: crate event memakai Candy, sisanya Seeds.
     local function currencyOf(crate)
         if tostring(crate):lower():find("halloween", 1, true) then return "Candy" end
         return "Seeds"
     end
-    local AMOUNT_SINGLE, AMOUNT_MULTI = "Single (1)", "Multi (10 / Halloween 13)"
-    -- delay = jeda antar summon (detik), diatur lewat slider 0,5 - 2 detik
-    local SCfg = { crate = KNOWN_CRATES[1], custom = "", amount = AMOUNT_MULTI, guard = false, minSeeds = 0, minCandy = 0, delay = 0.5 }
+    local AMOUNT_SINGLE, AMOUNT_MULTI = "Single", "Multi"
+    local SCfg = { crate = KNOWN_CRATES[1], amount = AMOUNT_MULTI, guard = false, minSeeds = 0, minCandy = 0, delay = 0.5 }
 
     local tSum = AddTab("Summon")
     local sSum = tSum:AddSection("Auto Summon", "left")
-    local sGuard = tSum:AddSection("Jaga Saldo", "right")
+    local sGuard = tSum:AddSection("Currency", "right")
 
-    local crateDropdown
-    local function crateList()
+    -- ---- nama crate ----
+    local foundNames = {}
+    local function nameFromGame(id)
+        -- cari objek bernama sama dengan ID crate (data / tombol summon di lobby), lalu ambil namanya
+        local found
+        for _, root in ipairs({ ReplicatedStorage, LocalPlayer:FindFirstChildOfClass("PlayerGui"), workspace }) do
+            if found then break end
+            pcall(function()
+                for _, d in ipairs(root:GetDescendants()) do
+                    if d.Name == id then
+                        for _, key in ipairs({ "DisplayName", "Title", "BoxName", "Name" }) do
+                            local v = d:GetAttribute(key)
+                            if type(v) == "string" and v ~= "" and v ~= id then found = v return end
+                        end
+                        for _, c in ipairs(d:GetDescendants()) do
+                            if c:IsA("TextLabel") or c:IsA("TextButton") then
+                                local t = tostring(c.Text):gsub("<[^>]+>", "")
+                                if #t <= 40 and t:lower():find("summon", 1, true) then found = t return end
+                            elseif c:IsA("StringValue") and (c.Name == "DisplayName" or c.Name == "Title") and c.Value ~= "" then
+                                found = c.Value return
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+        return found
+    end
+    local function displayName(id)
+        if CRATE_NAMES[id] then return CRATE_NAMES[id] end
+        if foundNames[id] then return foundNames[id] end
+        local words = {}
+        for w in tostring(id):gsub("^ub_", ""):gmatch("[^_]+") do
+            words[#words + 1] = w:sub(1, 1):upper() .. w:sub(2)
+        end
+        return table.concat(words, " ") .. " Summon"
+    end
+    local nameToId = {}
+    local function crateIds(scanGame)
         local list, seen = {}, {}
         local function add(n)
             if type(n) == "string" and n:match("^ub_[%w_]+$") and not seen[n] then
@@ -4620,41 +4660,50 @@ end), "toggle")
             end
         end
         for _, n in ipairs(KNOWN_CRATES) do add(n) end
-        -- cari crate lain dari nama objek di game (mis. model / data crate bernama "ub_...")
-        for _, root in ipairs({ ReplicatedStorage, workspace }) do
-            pcall(function()
-                for _, d in ipairs(root:GetDescendants()) do add(d.Name) end
-            end)
+        if scanGame then
+            -- semua crate yang ada di game (objek bernama "ub_...")
+            for _, root in ipairs({ ReplicatedStorage, workspace }) do
+                pcall(function()
+                    for _, d in ipairs(root:GetDescendants()) do add(d.Name) end
+                end)
+            end
         end
-        table.sort(list)
         return list
     end
-    local function selectedCrate()
-        local c = tostring(SCfg.custom or ""):gsub("%s+", "")
-        if c ~= "" then return c end
-        return SCfg.crate
+    local function crateOptions(ids)
+        nameToId = {}
+        local names = {}
+        for _, id in ipairs(ids) do
+            local n = displayName(id)
+            if nameToId[n] then n = n .. " (" .. id .. ")" end -- dua crate bernama sama
+            nameToId[n] = id
+            names[#names + 1] = n
+        end
+        table.sort(names)
+        return names
     end
+    local function resolveCrate(v)
+        v = tostring(v or "")
+        if v:match("^ub_[%w_]+$") then return v end -- config lama menyimpan ID
+        return nameToId[v] or SCfg.crate
+    end
+    local function selectedCrate() return SCfg.crate end
     local function amountFor(crate)
-        if SCfg.amount == AMOUNT_SINGLE then return 1 end
+        if tostring(SCfg.amount):sub(1, 6) == AMOUNT_SINGLE then return 1 end
         return MULTI_AMOUNT[crate] or 10
     end
 
-    crateDropdown = Flag("summonCrate", sSum:AddDropdown("Crate", KNOWN_CRATES, SCfg.crate, function(v)
-        SCfg.crate = v
+    local crateDropdown = Flag("summonCrate", sSum:AddDropdown("Crate", crateOptions(KNOWN_CRATES), displayName(SCfg.crate), function(v)
+        SCfg.crate = resolveCrate(v)
     end))
-    sSum:AddButton("Scan Crate Lain", function()
-        local list = crateList()
-        crateDropdown:SetOptions(list)
-        notify("Ditemukan " .. #list .. " crate")
-    end)
-    Flag("summonCustom", sSum:AddInput("Crate ID Lain (opsional)", "mis. ub_xxx (kosong = pakai pilihan di atas)", "", function(t)
-        SCfg.custom = tostring(t or "")
-    end, false), "input")
-    Flag("summonAmount", sSum:AddDropdown("Jumlah", { AMOUNT_SINGLE, AMOUNT_MULTI }, SCfg.amount, function(v)
-        SCfg.amount = v
+    local amountDropdown
+    amountDropdown = Flag("summonAmount", sSum:AddDropdown("Summon", { AMOUNT_SINGLE, AMOUNT_MULTI }, SCfg.amount, function(v)
+        local norm = (tostring(v):sub(1, 6) == AMOUNT_SINGLE) and AMOUNT_SINGLE or AMOUNT_MULTI
+        SCfg.amount = norm
+        if v ~= norm then task.defer(function() amountDropdown:Set(norm, true) end) end
     end))
-    Flag("summonDelay", sSum:AddSlider("Delay Summon", 0.5, 2, SCfg.delay, " detik", function(v)
-        SCfg.delay = math.clamp(tonumber(v) or 0.5, 0.5, 2)
+    Flag("summonDelay", sSum:AddSlider("Delay Summon", 0.1, 2, SCfg.delay, " detik", function(v)
+        SCfg.delay = math.clamp(tonumber(v) or 0.5, 0.1, 2)
     end, 0.1))
     local statusLabel = sSum:AddLabel("Status: mati")
 
@@ -4667,7 +4716,6 @@ end), "toggle")
     Flag("summonMinCandy", sGuard:AddInput("Sisakan Candy minimal", "0", "", function(t)
         SCfg.minCandy = tonumber(t) or 0
     end, true), "input")
-    sGuard:AddLabel("Auto Summon berhenti sendiri kalau summon berikutnya akan membuat saldo di bawah batas. Crate Halloween memakai Candy, crate lain memakai Seeds.")
 
     -- ---- loop auto summon ----
     local autoToggle
@@ -4709,7 +4757,7 @@ end), "toggle")
                 local key = crate .. "|" .. amount
                 if SCfg.guard then
                     if not before then
-                        stop(kind .. " tidak terbaca, Jaga Saldo tidak bisa bekerja")
+                        stop(kind .. " tidak terbaca, batas Currency tidak bisa bekerja")
                         return
                     end
                     local min = (kind == "Candy") and SCfg.minCandy or SCfg.minSeeds
@@ -4724,7 +4772,7 @@ end), "toggle")
                     stop("remote " .. SUMMON_REMOTE .. " tidak ditemukan")
                     return
                 end
-                setStatus(string.format("summon %s x%d...", crate, amount))
+                setStatus(string.format("summon %s x%d...", displayName(crate), amount))
                 local sent, res
                 if r:IsA("RemoteFunction") then
                     sent, res = pcall(r.InvokeServer, r, crate, amount)
@@ -4745,7 +4793,7 @@ end), "toggle")
                     if spent then learnedCost[key] = before - after end
                     fails = 0
                     total = total + amount
-                    setStatus(string.format("jalan | %s x%d | total %d unit%s", crate, amount, total,
+                    setStatus(string.format("jalan | %s x%d | total %d unit%s", displayName(crate), amount, total,
                         before and after and string.format(" | %s %d", kind, after) or ""))
                 else
                     fails = fails + 1
@@ -4763,9 +4811,14 @@ end), "toggle")
         run(v)
     end), "toggle")
     task.defer(function()
-        -- tambahkan crate yang ditemukan di game ke pilihan (sekali saat script dijalankan)
-        local list = crateList()
-        if #list > #KNOWN_CRATES then crateDropdown:SetOptions(list) end
+        -- sekali saat script dijalankan: kumpulkan semua crate di game beserta namanya
+        local ids = crateIds(true)
+        for _, id in ipairs(ids) do
+            if not CRATE_NAMES[id] then foundNames[id] = nameFromGame(id) end
+        end
+        local current = SCfg.crate
+        crateDropdown:SetOptions(crateOptions(ids))
+        crateDropdown:Set(displayName(current), true)
     end)
 end)()
 local tHook = AddTab("Webhook")
