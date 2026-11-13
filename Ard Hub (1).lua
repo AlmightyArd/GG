@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v2.7.3"
+local VERSION = "v2.7.5"
 local FOOTER = "Garden Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/config.json"
@@ -838,11 +838,17 @@ function Section:AddDropdown(title, options, default, callback)
         TextSize = 12,
         Parent = btn,
     })
-    local list = new("Frame", {
+    -- Daftar pilihan: paling tinggi DROPDOWN_ROWS baris, sisanya di-scroll (tidak memanjang ke bawah).
+    local DROPDOWN_ROWS, ROW_H = 5, 22
+    local list = new("ScrollingFrame", {
         Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
         BackgroundColor3 = THEME.field,
         BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        ScrollBarImageColor3 = THEME.stroke,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
         Visible = false,
         LayoutOrder = 3,
         Parent = holder,
@@ -871,9 +877,11 @@ function Section:AddDropdown(title, options, default, callback)
         for _, c in ipairs(list:GetChildren()) do
             if c:IsA("TextButton") then c:Destroy() end
         end
+        list.Size = UDim2.new(1, 0, 0, math.min(math.max(#opts, 1), DROPDOWN_ROWS) * ROW_H + 4)
+        list.CanvasPosition = Vector2.new(0, 0)
         for i, opt in ipairs(opts) do
             local b = new("TextButton", {
-                Size = UDim2.new(1, 0, 0, 22),
+                Size = UDim2.new(1, -4, 0, ROW_H),
                 BackgroundTransparency = 1,
                 Text = "  " .. tostring(opt),
                 TextColor3 = THEME.muted,
@@ -4598,6 +4606,7 @@ end), "toggle")
     -- Nama tampilan crate. Yang tidak ada di sini dicari dari game, lalu dari ID (ub_space -> "Space Summon").
     local CRATE_NAMES = {
         ub_halloween26 = "Skull Summon",
+        ub_volcano = "Volcano Summon",
     }
     -- Jumlah "Multi" per crate (bawaan 10). Skull Summon (Halloween) memakai 13.
     local MULTI_AMOUNT = { ub_halloween26 = 13 }
@@ -4607,7 +4616,8 @@ end), "toggle")
         return "Seeds"
     end
     local AMOUNT_SINGLE, AMOUNT_MULTI = "Single", "Multi"
-    local SCfg = { crate = KNOWN_CRATES[1], amount = AMOUNT_MULTI, guard = false, minSeeds = 0, minCandy = 0, delay = 0.5 }
+    local DEFAULT_CRATE = "ub_halloween26" -- Skull Summon (event sekarang)
+    local SCfg = { crate = DEFAULT_CRATE, amount = AMOUNT_MULTI, guard = false, minSeeds = 0, minCandy = 0, delay = 0.5 }
 
     local tSum = AddTab("Summon")
     local sSum = tSum:AddSection("Auto Summon", "left")
@@ -4630,7 +4640,9 @@ end), "toggle")
                         for _, c in ipairs(d:GetDescendants()) do
                             if c:IsA("TextLabel") or c:IsA("TextButton") then
                                 local t = tostring(c.Text):gsub("<[^>]+>", "")
-                                if #t <= 40 and t:lower():find("summon", 1, true) then found = t return end
+                                local tl = t:lower():gsub("^%s+", ""):gsub("%s+$", "")
+                                -- tulisan "Summon" saja (tombol) bukan nama crate
+                                if #t <= 40 and tl ~= "summon" and tl:find("summon", 1, true) then found = t return end
                             elseif c:IsA("StringValue") and (c.Name == "DisplayName" or c.Name == "Title") and c.Value ~= "" then
                                 found = c.Value return
                             end
