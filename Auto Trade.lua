@@ -801,30 +801,61 @@ local function dragX(o, fromX, toX, y)
     task.wait(0.15)
 end
 -- Atur slider ke `amount` (dibatasi maks). Mengembalikan nilai yang terbaca setelahnya, atau nil.
+-- Susunan jendela (dari trade_gui_dump.txt):
+--   AmountAdd.Frame.Frame.Items.Items.Picker.Amount / AmountMin / AmountMax   (TextLabel angka)
+--   AmountAdd.Frame.Frame.Items.Items.Picker.SliderContainer.DragCircle       (kenop, punya UIDragDetector)
+--   AmountAdd.Frame.Frame.Items.Items.Picker.SliderContainer.Scroll           (batang)
 local function setAmount(root, amount)
+    local picker = root and find(root, "Frame.Frame.Items.Items.Picker")
+    if not picker then return nil end
+    local amountL, minL, maxL = picker:FindFirstChild("Amount"), picker:FindFirstChild("AmountMin"), picker:FindFirstChild("AmountMax")
+    local cont = picker:FindFirstChild("SliderContainer")
+    local circle = cont and cont:FindFirstChild("DragCircle")
+    local bar = cont and (cont:FindFirstChild("Scroll") or cont)
+    if not (amountL and minL and maxL and circle and bar) then return nil end
+    local det = circle:FindFirstChildWhichIsA("UIDragDetector")
+    local identity
+    if getIdentity then pcall(function() identity = getIdentity() end) end
+    local function value() return tonumber((tostring(amountL.Text):gsub("%s", ""))) end
+    local lo, hi = tonumber(minL.Text) or 1, tonumber(maxL.Text) or 1
+    local target = math.clamp(amount, lo, hi)
+    if value() == target then return target end
+    local span = math.max(hi - lo, 1)
+    local function pointAt(f)
+        local x = bar.AbsolutePosition.X + bar.AbsoluteSize.X * f
+        local y = circle.AbsolutePosition.Y + circle.AbsoluteSize.Y / 2
+        return x, y
+    end
     local wasEnabled = gui.Enabled
     gui.Enabled = false
-    local result
-    pcall(function()
-        for _ = 1, 6 do
-            local sl = readSlider(root)
-            if not sl or not sl.knob then return end
-            local target = math.clamp(amount, sl.lo, sl.hi)
-            if sl.cur.n == target then result = target return end
-            local tl, tw = sl.track.AbsolutePosition.X, sl.track.AbsoluteSize.X
-            local kw = sl.knob.AbsoluteSize.X
-            local span = (sl.hi > sl.lo) and (sl.hi - sl.lo) or 1
-            -- posisi kenop: dari tl + kw/2 (nilai min) sampai tl + tw - kw/2 (nilai maks)
-            local x0, x1 = tl + kw / 2, tl + tw - kw / 2
-            local toX = x0 + (x1 - x0) * (target - sl.lo) / span
-            local kc = centerOf(sl.knob)
-            dragX(sl.knob, kc.X, toX, kc.Y)
+    local ok = pcall(function()
+        -- sedikit digeser ke tengah "petak" angka supaya pembulatan game jatuh di angka yang benar
+        for _, nudge in ipairs({ 0, 0.35, -0.35 }) do
+            local f = math.clamp((target - lo + nudge) / span, 0, 1)
+            local x, y = pointAt(f)
+            -- Cara A: kirim sinyal tarik ke UIDragDetector seperti saat kenop ditarik jari
+            if det and firesignal then
+                pcall(function()
+                    local cx, cy = circle.AbsolutePosition.X + circle.AbsoluteSize.X / 2, y
+                    firesignal(det.DragStart, Vector2.new(cx, cy))
+                    task.wait(0.03)
+                    circle.Position = UDim2.new(f, 0, circle.Position.Y.Scale, circle.Position.Y.Offset)
+                    firesignal(det.DragContinue, Vector2.new(x, y))
+                    task.wait(0.03)
+                    firesignal(det.DragEnd, Vector2.new(x, y))
+                end)
+                task.wait(0.15)
+                if value() == target then return end
+            end
+            -- Cara B: geser kenop lewat input layar
+            dragX(circle, circle.AbsolutePosition.X + circle.AbsoluteSize.X / 2, x, y)
+            if value() == target then return end
         end
-        local sl = readSlider(root)
-        result = sl and sl.cur.n or nil
     end)
+    if identity and setIdentity then pcall(setIdentity, identity) end
     gui.Enabled = wasEnabled
-    return result
+    if not ok then log("[diag] error saat mengatur slider") end
+    return value()
 end
 -- Cara 1: tekan tombol game seperti orang (game sendiri yang memilih salinan unit yang valid)
 local function addViaButtons(t, id, amount)
@@ -848,11 +879,14 @@ local function addViaButtons(t, id, amount)
         if amount > 1 then
             -- item bertumpuk: atur jumlah di slider dulu, lalu Add sekali
             local got = setAmount(find(tr, "AmountAdd"), amount)
-            if got and got > 1 then
+            if got and got > 1 and got <= amount then
                 want = got
             else
+                -- jumlah tidak pas: jangan Add, tutup jendela jumlah
                 log("[diag] slider jumlah tidak bisa diatur (terbaca: " .. tostring(got) .. ")")
-                dumpTradeGui("slider " .. id)
+                local cancel = asButton(find(tr, "AmountAdd.Frame.Frame.Actions.Items.Cancel"))
+                if cancel then clickButton(cancel) end
+                return false, "slider jumlah tidak bisa diatur"
             end
         end
         clickButton(add)
@@ -868,13 +902,26 @@ local function addViaButtons(t, id, amount)
 end
 -- Cara 2 (cadangan): kirim ID unik item langsung ke server
 local function addViaRemote(t, id, amount)
+    -- baca inventory dari awal supaya unit yang sudah terjual tidak ikut dipilih
+    local old = inventory
+    inventory = {}
     loadInventory()
+    if next(inventory) == nil then inventory = old end
     local list = pickUniques(id, amount)
     if #list == 0 then return false, "ID unik " .. id .. " tidak terbaca" end
+    if #list < amount then return false, "hanya " .. #list .. " " .. id .. " terbaca di inventory" end
     local before = giveCount()
+    -- sama seperti game: semua salinan dikirim sekaligus, mis. { "unique_22", "unique_21" }
     call("TradeAddToOffer", t.id, list)
-    if before ~= nil and not waitCountAbove(before, 2.5) then
-        return false, "server menolak " .. table.concat(list, ", ")
+    if before ~= nil then
+        if not waitCountAbove(before, 2.5) then
+            return false, "server menolak " .. table.concat(list, ", ")
+        end
+        task.wait(0.3)
+        local now = giveCount() or before
+        if now - before ~= amount then
+            return false, string.format("jumlah di offer bertambah %d, seharusnya %d", now - before, amount)
+        end
     end
     t.given = t.given or {}
     for _, u in ipairs(list) do t.given[#t.given + 1] = u end
@@ -899,7 +946,20 @@ local function fillOffer(t)
             while done < total and tries < total + 2 do
                 tries = tries + 1
                 if active ~= t then return end
-                local ok, why, n = addViaButtons(t, id, total - done)
+                local ok, why, n
+                local beforeTry = giveCount()
+                ok, why, n = addViaButtons(t, id, total - done) -- jumlah diatur lewat slider jendela jumlah
+                if not ok and total - done > 1 then
+                    -- cadangan: kirim beberapa ID unik sekaligus, seperti yang dikirim game saat Add
+                    log("lewat tombol gagal (" .. tostring(why) .. "), coba lewat server")
+                    if beforeTry and (giveCount() or 0) > beforeTry then break end -- sebagian sudah masuk
+                    ok, why = addViaRemote(t, id, total - done)
+                    n = total - done
+                    if not ok then
+                        log("GAGAL menaruh " .. label .. ": " .. tostring(why))
+                        break
+                    end
+                end
                 if ok then
                     done = done + (n or 1)
                     log("offer diisi: " .. label .. " (" .. math.min(done, total) .. "/" .. total .. ")")
