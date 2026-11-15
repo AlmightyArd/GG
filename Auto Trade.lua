@@ -870,12 +870,29 @@ local function addViaButtons(t, id, amount)
     if active ~= t then return false, "trade selesai" end
     local item = asButton(find(tr, "Inventory.Inventory.Frame.Items.Items.ScrollingFrame." .. id))
     if not item then return false, id .. " tidak ada di inventory trade" end
-    clickButton(item)
-    task.wait(0.5 + math.random() * 0.3)
+    -- Angka di jendela jumlah masih berisi angka item sebelumnya (mis. "3" dari Ghost Lily).
+    -- Dikosongkan dulu; game mengisinya lagi ("1") saat jendela jumlah benar-benar terbuka untuk item ini.
+    local amountL = find(tr, "AmountAdd.Frame.Frame.Items.Items.Picker.Amount")
+    local function windowOpen() return amountL and tostring(amountL.Text) ~= "" end
+    if amountL then pcall(function() amountL.Text = "" end) end
+    local opened = false
+    for _ = 1, 2 do
+        clickButton(item)
+        local w0 = os.clock()
+        repeat task.wait(0.15) until windowOpen() or os.clock() - w0 > 1.5 or active ~= t
+        if active ~= t then return false, "trade selesai" end
+        if windowOpen() then opened = true break end
+        if not amountL then break end
+        item = asButton(find(tr, "Inventory.Inventory.Frame.Items.Items.ScrollingFrame." .. id)) or item
+    end
+    task.wait(0.2 + math.random() * 0.2)
     if active ~= t then return false, "trade selesai" end
+    if amount > 1 and amountL and not opened then
+        return false, "jendela jumlah tidak muncul untuk " .. id
+    end
     local add = asButton(find(tr, "AmountAdd.Frame.Frame.Actions.Items.Add"))
     local want = 1
-    if add and add.Visible then
+    if add and add.Visible and (opened or not amountL or amount == 1) then
         if amount > 1 then
             -- item bertumpuk: atur jumlah di slider dulu, lalu Add sekali
             local got = setAmount(find(tr, "AmountAdd"), amount)
