@@ -729,8 +729,106 @@ local function dumpTradeGui(tag)
     end
     log("[diag] " .. tag .. " | jumlah terbaca=" .. tostring(giveCount()) .. " | tulisan offer: " .. table.concat(texts, " / "))
 end
+-- Jendela jumlah ("How many Rageroots do you want to add?") punya slider 1..maks.
+-- Slider digeser lewat input layar sampai angka di atasnya sama dengan jumlah yang dibutuhkan.
+local function screenPos(o, x, y)
+    local sg = o:FindFirstAncestorOfClass("ScreenGui")
+    if not (sg and sg.IgnoreGuiInset) then
+        local inset = game:GetService("GuiService"):GetGuiInset()
+        return x + inset.X, y + inset.Y
+    end
+    return x, y
+end
+local function centerOf(o) return o.AbsolutePosition + o.AbsoluteSize / 2 end
+local function readSlider(root)
+    -- angka-angka di jendela: min & maks sebaris dengan slider, nilai sekarang di atasnya
+    local nums = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            local n = tonumber((tostring(d.Text):gsub("%s", "")))
+            if n and d.AbsoluteSize.X > 0 then nums[#nums + 1] = { obj = d, n = n, c = centerOf(d) } end
+        end
+    end
+    if #nums < 3 then return nil end
+    table.sort(nums, function(a, b) return a.c.Y < b.c.Y end)
+    local cur = nums[1] -- paling atas
+    local row = {}
+    for i = 2, #nums do row[#row + 1] = nums[i] end
+    table.sort(row, function(a, b) return a.c.X < b.c.X end)
+    local lo, hi = row[1], row[#row]
+    -- batang slider: objek lebar & tipis di antara label min dan maks
+    local track, bestW = nil, 0
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiObject") and not d:IsA("TextLabel") then
+            local sz, c = d.AbsoluteSize, centerOf(d)
+            if sz.X > bestW and sz.X > sz.Y * 4 and c.X > lo.c.X and c.X < hi.c.X
+                and math.abs(c.Y - lo.c.Y) < math.max(sz.Y, 20) then
+                track, bestW = d, sz.X
+            end
+        end
+    end
+    if not track then return nil end
+    -- kenop: objek kira-kira persegi, sebaris dengan batang, paling dekat ke posisi nilai sekarang
+    local knob, knobDist = nil, math.huge
+    local tl, tw = track.AbsolutePosition.X, track.AbsoluteSize.X
+    local f = (hi.n > lo.n) and (cur.n - lo.n) / (hi.n - lo.n) or 0
+    local guessX = tl + f * tw
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiObject") and d ~= track and not d:IsA("TextLabel") then
+            local sz, c = d.AbsoluteSize, centerOf(d)
+            if sz.X > 4 and math.abs(sz.X - sz.Y) <= math.max(sz.X, sz.Y) * 0.35
+                and math.abs(c.Y - centerOf(track).Y) < math.max(sz.Y, 12) and sz.X < tw / 3 then
+                local dist = math.abs(c.X - guessX)
+                if dist < knobDist then knob, knobDist = d, dist end
+            end
+        end
+    end
+    return { cur = cur, lo = lo.n, hi = hi.n, track = track, knob = knob }
+end
+local function dragX(o, fromX, toX, y)
+    local vim = game:GetService("VirtualInputManager")
+    local x1, y1 = screenPos(o, fromX, y)
+    local x2 = select(1, screenPos(o, toX, y))
+    vim:SendMouseMoveEvent(x1, y1, game)
+    task.wait(0.03)
+    vim:SendMouseButtonEvent(x1, y1, 0, true, game, 0)
+    for i = 1, 8 do
+        task.wait(0.03)
+        vim:SendMouseMoveEvent(x1 + (x2 - x1) * i / 8, y1, game)
+    end
+    task.wait(0.05)
+    vim:SendMouseButtonEvent(x2, y1, 0, false, game, 0)
+    task.wait(0.15)
+end
+-- Atur slider ke `amount` (dibatasi maks). Mengembalikan nilai yang terbaca setelahnya, atau nil.
+local function setAmount(root, amount)
+    local wasEnabled = gui.Enabled
+    gui.Enabled = false
+    local result
+    pcall(function()
+        for _ = 1, 6 do
+            local sl = readSlider(root)
+            if not sl or not sl.knob then return end
+            local target = math.clamp(amount, sl.lo, sl.hi)
+            if sl.cur.n == target then result = target return end
+            local tl, tw = sl.track.AbsolutePosition.X, sl.track.AbsoluteSize.X
+            local kw = sl.knob.AbsoluteSize.X
+            local span = (sl.hi > sl.lo) and (sl.hi - sl.lo) or 1
+            -- posisi kenop: dari tl + kw/2 (nilai min) sampai tl + tw - kw/2 (nilai maks)
+            local x0, x1 = tl + kw / 2, tl + tw - kw / 2
+            local toX = x0 + (x1 - x0) * (target - sl.lo) / span
+            local kc = centerOf(sl.knob)
+            dragX(sl.knob, kc.X, toX, kc.Y)
+        end
+        local sl = readSlider(root)
+        result = sl and sl.cur.n or nil
+    end)
+    gui.Enabled = wasEnabled
+    return result
+end
 -- Cara 1: tekan tombol game seperti orang (game sendiri yang memilih salinan unit yang valid)
-local function addViaButtons(t, id)
+local function addViaButtons(t, id, amount)
+    amount = amount or 1
     local tr = tradeGui()
     if not tr then return false, "jendela trade tidak ditemukan" end
     local before = giveCount()
@@ -745,14 +843,25 @@ local function addViaButtons(t, id)
     task.wait(0.5 + math.random() * 0.3)
     if active ~= t then return false, "trade selesai" end
     local add = asButton(find(tr, "AmountAdd.Frame.Frame.Actions.Items.Add"))
+    local want = 1
     if add and add.Visible then
-        dumpTradeGui("jendela jumlah terbuka (" .. id .. ")")
+        if amount > 1 then
+            -- item bertumpuk: atur jumlah di slider dulu, lalu Add sekali
+            local got = setAmount(find(tr, "AmountAdd"), amount)
+            if got and got > 1 then
+                want = got
+            else
+                log("[diag] slider jumlah tidak bisa diatur (terbaca: " .. tostring(got) .. ")")
+                dumpTradeGui("slider " .. id)
+            end
+        end
         clickButton(add)
     end
-    if before == nil then return true, nil end -- daftar offer tidak terbaca: anggap berhasil
+    if before == nil then return true, nil, want end -- daftar offer tidak terbaca: anggap berhasil
     if waitCountAbove(before, 2.5) then
-        dumpTradeGui("sesudah tambah " .. id)
-        return true, nil
+        task.wait(0.3)
+        local now = giveCount() or (before + 1)
+        return true, nil, math.max(now - before, 1)
     end
     dumpTradeGui("GAGAL tambah " .. id)
     return false, "item tidak masuk ke offer"
@@ -786,18 +895,26 @@ local function fillOffer(t)
             log(label .. " tidak ditemukan di inventory trade (cek ejaan nama, atau isi id)")
             allOk = false
         else
-            for i = 1, (g.amount or 1) do
+            local total, done, tries = g.amount or 1, 0, 0
+            while done < total and tries < total + 2 do
+                tries = tries + 1
                 if active ~= t then return end
-                local ok, why = addViaButtons(t, id)
+                local ok, why, n = addViaButtons(t, id, total - done)
                 if ok then
-                    log("offer diisi: " .. label .. " (" .. i .. "/" .. (g.amount or 1) .. ")")
+                    done = done + (n or 1)
+                    log("offer diisi: " .. label .. " (" .. math.min(done, total) .. "/" .. total .. ")")
                 else
                     log("lewat tombol gagal (" .. tostring(why) .. "), coba lewat server")
                     ok, why = addViaRemote(t, id, 1)
                     log(ok and ("offer diisi lewat server: " .. label) or ("GAGAL menaruh " .. label .. ": " .. tostring(why)))
+                    if not ok then break end
+                    done = done + 1
                 end
-                allOk = allOk and ok
                 task.wait(0.4)
+            end
+            if done ~= total then
+                if done > total then log("PERINGATAN: " .. label .. " di offer " .. done .. ", seharusnya " .. total) end
+                allOk = false
             end
         end
     end
@@ -808,7 +925,7 @@ local function fillOffer(t)
         evaluate(t)
     elseif active == t and On.trade and CONFIG.AUTO_DECLINE then
         -- item iklan tidak bisa ditaruh (mis. unitnya sudah habis): trade tidak mungkin jalan, langsung decline
-        declineTrade(t, "item iklan tidak ada di inventory")
+        declineTrade(t, "item iklan gagal ditaruh ke offer")
     end
 end
 
