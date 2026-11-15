@@ -694,6 +694,41 @@ local function waitCountAbove(before, limit)
     end
     return false
 end
+-- Diagnosa: simpan isi kotak offer kita dan jendela jumlah (AmountAdd) ke file, supaya bisa dilihat
+-- bagaimana game menampilkan item bertumpuk.
+local function dumpTradeGui(tag)
+    local tr = tradeGui()
+    if not tr then return end
+    local out = { "== " .. tag .. " " .. os.date("%H:%M:%S") }
+    local function walk(root, label)
+        if not root then out[#out + 1] = label .. ": (tidak ada)" return end
+        out[#out + 1] = label .. ":"
+        for _, d in ipairs(root:GetDescendants()) do
+            local line = "  " .. d:GetFullName():sub(#root:GetFullName() + 2) .. " [" .. d.ClassName .. "]"
+            local okT, txt = pcall(function() return d.Text end)
+            if okT and type(txt) == "string" and txt ~= "" then line = line .. ' text="' .. txt .. '"' end
+            local okV, vis = pcall(function() return d.Visible end)
+            if okV and vis == false then line = line .. " (hidden)" end
+            out[#out + 1] = line
+        end
+    end
+    walk(giveList(), "OFFER KITA")
+    walk(find(tr, "AmountAdd"), "AMOUNTADD")
+    local text = table.concat(out, "\n")
+    local old = ""
+    if readfile and isfile then pcall(function() if isfile("ArdHub/trade_gui_dump.txt") then old = readfile("ArdHub/trade_gui_dump.txt") .. "\n\n" end end) end
+    saveFile("trade_gui_dump.txt", old .. text)
+    -- ringkas di log: semua tulisan di kotak offer kita
+    local texts = {}
+    local list = giveList()
+    if list then
+        for _, d in ipairs(list:GetDescendants()) do
+            local okT, txt = pcall(function() return d.Text end)
+            if okT and type(txt) == "string" and txt ~= "" then texts[#texts + 1] = txt end
+        end
+    end
+    log("[diag] " .. tag .. " | jumlah terbaca=" .. tostring(giveCount()) .. " | tulisan offer: " .. table.concat(texts, " / "))
+end
 -- Cara 1: tekan tombol game seperti orang (game sendiri yang memilih salinan unit yang valid)
 local function addViaButtons(t, id)
     local tr = tradeGui()
@@ -711,10 +746,15 @@ local function addViaButtons(t, id)
     if active ~= t then return false, "trade selesai" end
     local add = asButton(find(tr, "AmountAdd.Frame.Frame.Actions.Items.Add"))
     if add and add.Visible then
+        dumpTradeGui("jendela jumlah terbuka (" .. id .. ")")
         clickButton(add)
     end
     if before == nil then return true, nil end -- daftar offer tidak terbaca: anggap berhasil
-    if waitCountAbove(before, 2.5) then return true, nil end
+    if waitCountAbove(before, 2.5) then
+        dumpTradeGui("sesudah tambah " .. id)
+        return true, nil
+    end
+    dumpTradeGui("GAGAL tambah " .. id)
     return false, "item tidak masuk ke offer"
 end
 -- Cara 2 (cadangan): kirim ID unik item langsung ke server
