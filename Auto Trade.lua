@@ -659,12 +659,24 @@ local function giveList()
     local tr = tradeGui()
     return tr and find(tr, "Items.Container.Items.Left.Give.Items.ScrollingFrame")
 end
+-- Jumlah total item di offer kita. Item bertumpuk (mis. Rageroot) masuk ke kotak yang sama
+-- dengan tulisan "x2", jadi yang dihitung jumlahnya, bukan banyaknya kotak.
+local function slotAmount(slot)
+    for _, d in ipairs(slot:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") then
+            local txt = tostring(d.Text):gsub("\u{00D7}", "x")
+            local n = txt:match("^%s*[xX]%s*(%d+)%s*$") or txt:match("^%s*(%d+)%s*[xX]%s*$")
+            if n then return tonumber(n) end
+        end
+    end
+    return 1
+end
 local function giveCount()
     local list = giveList()
     if not list then return nil end
     local n = 0
     for _, c in ipairs(list:GetChildren()) do
-        if c:IsA("GuiObject") and c.Name ~= "unit_more" then n = n + 1 end
+        if c:IsA("GuiObject") and c.Name ~= "unit_more" then n = n + slotAmount(c) end
     end
     return n
 end
