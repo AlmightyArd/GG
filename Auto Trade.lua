@@ -885,7 +885,8 @@ local function addViaButtons(t, id, amount)
         if not amountL then break end
         item = asButton(find(tr, "Inventory.Inventory.Frame.Items.Items.ScrollingFrame." .. id)) or item
     end
-    task.wait(0.2 + math.random() * 0.2)
+    -- tunggu animasi jendela jumlah selesai; game mengabaikan Add yang ditekan terlalu cepat
+    task.wait(opened and (0.6 + math.random() * 0.3) or (0.2 + math.random() * 0.2))
     if active ~= t then return false, "trade selesai" end
     if amount > 1 and amountL and not opened then
         return false, "jendela jumlah tidak muncul untuk " .. id
@@ -909,7 +910,15 @@ local function addViaButtons(t, id, amount)
         clickButton(add)
     end
     if before == nil then return true, nil, want end -- daftar offer tidak terbaca: anggap berhasil
-    if waitCountAbove(before, 2.5) then
+    local landed = waitCountAbove(before, 1.5)
+    if not landed and add and add.Visible and (opened or amount == 1) then
+        -- Add tidak tercatat: tekan sekali lagi lewat input layar (seperti jari).
+        -- Aman, karena hanya dilakukan kalau isi offer belum bertambah sama sekali.
+        log("[diag] Add belum tercatat, ditekan lagi lewat input layar")
+        clickInput(add)
+        landed = waitCountAbove(before, 2)
+    end
+    if landed then
         task.wait(0.3)
         local now = giveCount() or (before + 1)
         return true, nil, math.max(now - before, 1)
