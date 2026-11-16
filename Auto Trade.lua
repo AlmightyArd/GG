@@ -59,7 +59,7 @@ local running = true
 local conns = {}
 
 local On = { bump = true, accept = true, trade = true }
-local stats = { bumps = 0, trades = 0 }
+local stats = { bumps = 0, trades = 0, cancelled = 0 } -- cancelled: offer sesuai, tapi trade batal
 
 ---------------------------------------------------------------------
 -- UI kecil: tombol on/off, status, log
@@ -165,7 +165,8 @@ task.spawn(function()
             uiDirty = false
             pcall(function()
                 logBox.Text = table.concat(logLines, "\n")
-                statusLabel.Text = string.format("%s\nBump %d kali | Trade selesai %d", statusText, stats.bumps, stats.trades)
+                statusLabel.Text = string.format("%s\nBump %d kali | Trade selesai %d | Sesuai tapi batal %d",
+                    statusText, stats.bumps, stats.trades, stats.cancelled)
             end)
         end
         task.wait(0.2)
@@ -1171,6 +1172,10 @@ onEvent("TradeClose", function(id, completed)
         stats.trades = stats.trades + 1
         for _, u in ipairs(t.given or {}) do usedUniques[u] = true end
         log("TRADE SELESAI dengan " .. t.partner)
+    elseif t.deal and not t.declined then
+        -- offer lawan sudah cocok dengan iklan, tapi trade batal (bukan karena kita decline)
+        stats.cancelled = stats.cancelled + 1
+        log("trade dengan " .. t.partner .. " dibatalkan (offer sudah sesuai " .. t.deal.label .. ")")
     else
         log("trade dengan " .. t.partner .. " dibatalkan")
     end
