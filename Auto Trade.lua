@@ -1184,6 +1184,32 @@ onEvent("TradeClose", function(id, completed)
 end)
 
 ---------------------------------------------------------------------
+-- Anti AFK: Roblox mengeluarkan pemain yang diam 20 menit.
+-- (1) Saat Roblox menandai Anda diam (event Idled), langsung dikirim input kecil.
+-- (2) Cadangan: input kecil setiap 10-15 menit (acak), walau Idled tidak muncul.
+---------------------------------------------------------------------
+do
+    local VirtualUser = game:GetService("VirtualUser")
+    local function nudge()
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
+    end
+    conns[#conns + 1] = LocalPlayer.Idled:Connect(function()
+        if running then nudge() end
+    end)
+    task.spawn(function()
+        while running do
+            local w0, wait = os.clock(), 600 + math.random() * 300
+            while running and os.clock() - w0 < wait do task.wait(5) end
+            if running then nudge() end
+        end
+    end)
+    log("Anti AFK aktif")
+end
+
+---------------------------------------------------------------------
 -- Auto Bump
 ---------------------------------------------------------------------
 local function findAdIds(v, out, depth, seen)
