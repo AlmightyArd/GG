@@ -91,7 +91,7 @@ do
     if not ok or not gui.Parent then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 end
 local win = new("Frame", {
-    Size = UDim2.new(0, 330, 0, 250), Position = UDim2.new(0, 20, 0, 80),
+    Size = UDim2.new(0, 390, 0, 300), Position = UDim2.new(0, 20, 0, 80),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true, Parent = gui,
 })
 round(win, 8)
@@ -136,13 +136,63 @@ local statusLabel = new("TextLabel", {
     Text = "", TextColor3 = C.muted, Font = Enum.Font.Code, TextSize = 11, TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Parent = win,
 })
+-- Tab: Log | Batal (n)
+local tabBar = new("Frame", { Size = UDim2.new(1, -16, 0, 22), Position = UDim2.new(0, 8, 0, 100), BackgroundTransparency = 1, Parent = win })
+local function makeTab(text, x)
+    local b = new("TextButton", {
+        Size = UDim2.new(0.5, -3, 1, 0), Position = UDim2.new(x, x > 0 and 3 or 0, 0, 0), BackgroundColor3 = C.field,
+        BorderSizePixel = 0, AutoButtonColor = false, Text = text, TextColor3 = C.muted, Font = Enum.Font.Code, TextSize = 11, Parent = tabBar,
+    })
+    round(b, 5)
+    local st = new("UIStroke", { Color = C.stroke, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = b })
+    return b, st
+end
+local tabLog, tabLogStroke = makeTab("Log", 0)
+local tabBatal, tabBatalStroke = makeTab("Batal (0)", 0.5)
 local logBox = new("TextLabel", {
-    Size = UDim2.new(1, -16, 1, -108), Position = UDim2.new(0, 8, 0, 100), BackgroundColor3 = C.field,
+    Size = UDim2.new(1, -16, 1, -134), Position = UDim2.new(0, 8, 0, 126), BackgroundColor3 = C.field,
     BorderSizePixel = 0, Text = "", TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 10, TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Bottom, ClipsDescendants = true, Parent = win,
 })
 round(logBox, 5)
 new("UIPadding", { PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 4), Parent = logBox })
+local batalPanel = new("Frame", {
+    Size = UDim2.new(1, -16, 1, -134), Position = UDim2.new(0, 8, 0, 126), BackgroundTransparency = 1, Visible = false, Parent = win,
+})
+local batalScroll = new("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -30), BackgroundColor3 = C.field, BorderSizePixel = 0, ScrollBarThickness = 4,
+    ScrollBarImageColor3 = C.stroke, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = batalPanel,
+})
+round(batalScroll, 5)
+new("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder, Parent = batalScroll })
+new("UIPadding", { PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5), Parent = batalScroll })
+local function footBtn(text, x, primary)
+    local b = new("TextButton", {
+        Size = UDim2.new(0.5, -3, 0, 24), Position = UDim2.new(x, x > 0 and 3 or 0, 1, -24),
+        BackgroundColor3 = primary and C.accent or C.field, BorderSizePixel = 0, AutoButtonColor = false,
+        Text = text, TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 11, Parent = batalPanel,
+    })
+    round(b, 5)
+    if not primary then outline(b) end
+    return b
+end
+local copyBatalBtn = footBtn("Salin", 0, true)
+local clearBatalBtn = footBtn("Bersihkan", 0.5, false)
+local currentTab = "log"
+local function showTab(name)
+    currentTab = name
+    logBox.Visible = name == "log"
+    batalPanel.Visible = name == "batal"
+    tabLog.BackgroundColor3 = name == "log" and Color3.fromRGB(42, 35, 80) or C.field
+    tabBatal.BackgroundColor3 = name == "batal" and Color3.fromRGB(42, 35, 80) or C.field
+    tabLog.TextColor3 = name == "log" and C.text or C.muted
+    tabBatal.TextColor3 = name == "batal" and C.text or C.muted
+    tabLogStroke.Color = name == "log" and C.accent or C.stroke
+    tabBatalStroke.Color = name == "batal" and C.accent or C.stroke
+end
+tabLog.MouseButton1Click:Connect(function() showTab("log") end)
+tabBatal.MouseButton1Click:Connect(function() showTab("batal") end)
+showTab("log")
 
 -- Log & status hanya disimpan di sini; jendela diperbarui oleh satu loop UI (dibuat saat script dijalankan).
 -- Setelah menekan tombol game, sebagian executor menurunkan hak akses thread, sehingga thread itu
@@ -159,6 +209,95 @@ local function setStatus(text)
     statusText = text
     uiDirty = true
 end
+-- Trade yang offer-nya sesuai tapi batal. Disimpan ke ArdHub/trade_batal.json (dibaca lagi saat
+-- script dijalankan) dan ArdHub/trade_batal.txt (mudah dibaca / disalin).
+local batalList = {} -- terbaru di depan: { n, partner, time, ad, offer, stage }
+local batalDirty = true
+local BATAL_MAX = 100
+local function batalText()
+    local out = {}
+    for _, e in ipairs(batalList) do
+        out[#out + 1] = string.format("#%d %s  %s\nIklan : %s\nLawan: %s\nTahap: %s", e.n, e.partner,
+            os.date("%d %b %H:%M", e.time), e.ad, e.offer, e.stage)
+    end
+    return #out > 0 and table.concat(out, "\n\n") or "(belum ada)"
+end
+local function saveBatal()
+    if not writefile then return end
+    pcall(function()
+        if makefolder and isfolder and not isfolder("ArdHub") then makefolder("ArdHub") end
+        writefile("ArdHub/trade_batal.json", game:GetService("HttpService"):JSONEncode(batalList))
+        writefile("ArdHub/trade_batal.txt", batalText())
+    end)
+end
+pcall(function()
+    if readfile and isfile and isfile("ArdHub/trade_batal.json") then
+        local data = game:GetService("HttpService"):JSONDecode(readfile("ArdHub/trade_batal.json"))
+        if type(data) == "table" then batalList = data end
+    end
+end)
+stats.cancelled = #batalList
+local function addBatal(entry)
+    entry.n = ((batalList[1] and batalList[1].n) or 0) + 1
+    entry.time = os.time()
+    table.insert(batalList, 1, entry)
+    while #batalList > BATAL_MAX do table.remove(batalList) end
+    stats.cancelled = #batalList
+    batalDirty, uiDirty = true, true
+    saveBatal()
+end
+local function esc(t) return (tostring(t):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")) end
+local function renderBatal()
+    for _, c in ipairs(batalScroll:GetChildren()) do
+        if c:IsA("TextLabel") then c:Destroy() end
+    end
+    if #batalList == 0 then
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = "Belum ada trade yang sesuai tapi batal",
+            TextColor3 = C.muted, Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, Parent = batalScroll,
+        })
+        return
+    end
+    for i, e in ipairs(batalList) do
+        local card = new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = i,
+            BackgroundColor3 = Color3.fromRGB(18, 18, 23), BorderSizePixel = 0, RichText = true, TextWrapped = true,
+            TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top, Parent = batalScroll,
+            Text = string.format('#%d %s   <font color="#9696a5">%s</font>\n<font color="#9696a5">Iklan :</font> %s\n'
+                .. '<font color="#9696a5">Lawan:</font> %s\n<font color="#9696a5">Tahap:</font> <font color="#ffb35c">%s</font>',
+                e.n, esc(e.partner), os.date("%d %b %H:%M", e.time), esc(e.ad), esc(e.offer), esc(e.stage)),
+        })
+        round(card, 5)
+        outline(card)
+        new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), Parent = card })
+    end
+end
+copyBatalBtn.MouseButton1Click:Connect(function()
+    local ok = setclipboard and pcall(setclipboard, batalText())
+    copyBatalBtn.Text = ok and "Tersalin" or "Tidak didukung"
+    task.delay(1.5, function() if copyBatalBtn.Parent then copyBatalBtn.Text = "Salin" end end)
+end)
+local clearArmed = false
+clearBatalBtn.MouseButton1Click:Connect(function()
+    -- tekan dua kali supaya tidak terhapus tanpa sengaja
+    if not clearArmed then
+        clearArmed = true
+        clearBatalBtn.Text = "Yakin? tekan lagi"
+        task.delay(3, function()
+            clearArmed = false
+            if clearBatalBtn.Parent then clearBatalBtn.Text = "Bersihkan" end
+        end)
+        return
+    end
+    clearArmed = false
+    clearBatalBtn.Text = "Bersihkan"
+    batalList = {}
+    stats.cancelled = 0
+    batalDirty, uiDirty = true, true
+    saveBatal()
+end)
+
 task.spawn(function()
     while running do
         if uiDirty then
@@ -167,7 +306,12 @@ task.spawn(function()
                 logBox.Text = table.concat(logLines, "\n")
                 statusLabel.Text = string.format("%s\nBump %d kali | Trade selesai %d | Sesuai tapi batal %d",
                     statusText, stats.bumps, stats.trades, stats.cancelled)
+                tabBatal.Text = "Batal (" .. #batalList .. ")"
             end)
+        end
+        if batalDirty then
+            batalDirty = false
+            pcall(renderBatal)
         end
         task.wait(0.2)
     end
@@ -203,7 +347,7 @@ do -- geser & ubah ukuran
             win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         elseif resizing then
             local d = input.Position - rStart
-            win.Size = UDim2.new(0, math.max(rSize.X + d.X, 280), 0, math.max(rSize.Y + d.Y, 180))
+            win.Size = UDim2.new(0, math.max(rSize.X + d.X, 360), 0, math.max(rSize.Y + d.Y, 220))
         end
     end)
 end
@@ -1161,8 +1305,48 @@ onEvent("TradeReady", function(id, mine, theirs)
 end)
 
 onEvent("TradeStartCountdown", function(id, secs)
-    if active and active.id == id then log("finalizing trade... " .. tostring(secs) .. " detik") end
+    if active and active.id == id then
+        active.countdown = true
+        log("finalizing trade... " .. tostring(secs) .. " detik")
+    end
 end)
+
+-- Nama tampilan item ("unit_void_bloom" -> "Graviflora"), dibaca dari jendela game yang memuat item itu.
+local nameCache = {}
+local function nameOf(id)
+    if nameCache[id] then return nameCache[id] end
+    local found
+    pcall(function()
+        local gg = LocalPlayer.PlayerGui:FindFirstChild("GameGui")
+        for _, d in ipairs(gg and gg:GetDescendants() or {}) do
+            if d.Name == id then
+                local title = d:FindFirstChild("Title", true)
+                if title and title:IsA("TextLabel") and title.Text ~= "" then found = title.Text break end
+            end
+        end
+    end)
+    if not found then
+        -- cadangan: rapikan ID ("dp_gd_double_seeds" -> "Double Seeds")
+        found = tostring(id):gsub("^unit_", ""):gsub("^dp_gd_", ""):gsub("^dp_", ""):gsub("_", " ")
+            :gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end)
+    else
+        nameCache[id] = found
+    end
+    return found
+end
+local function itemsText(list)
+    local parts = {}
+    for _, x in ipairs(list or {}) do parts[#parts + 1] = nameOf(x.id) .. " x" .. (x.amount or 1) end
+    return #parts > 0 and table.concat(parts, " + ") or "?"
+end
+local function countsText(counts)
+    local ids = {}
+    for id in pairs(counts) do ids[#ids + 1] = id end
+    table.sort(ids)
+    local parts = {}
+    for _, id in ipairs(ids) do parts[#parts + 1] = nameOf(id) .. " x" .. counts[id] end
+    return #parts > 0 and table.concat(parts, ", ") or "(kosong)"
+end
 
 -- Trade selesai / batal
 onEvent("TradeClose", function(id, completed)
@@ -1174,7 +1358,18 @@ onEvent("TradeClose", function(id, completed)
         log("TRADE SELESAI dengan " .. t.partner)
     elseif t.deal and not t.declined then
         -- offer lawan sudah cocok dengan iklan, tapi trade batal (bukan karena kita decline)
-        stats.cancelled = stats.cancelled + 1
+        local stage
+        if t.countdown then stage = "finalizing (kedua pihak sudah Accept)"
+        elseif t.mine and not t.theirs then stage = "Anda sudah Accept, lawan belum"
+        elseif t.theirs and not t.mine then stage = "Lawan sudah Accept, Anda belum"
+        elseif t.filled then stage = "item sudah ditaruh, belum ada yang Accept"
+        else stage = "item Anda belum selesai ditaruh" end
+        addBatal({
+            partner = t.partner,
+            ad = itemsText(t.deal.give) .. " -> " .. itemsText(t.deal.want),
+            offer = countsText(t.counts or {}),
+            stage = stage,
+        })
         log("trade dengan " .. t.partner .. " dibatalkan (offer sudah sesuai " .. t.deal.label .. ")")
     else
         log("trade dengan " .. t.partner .. " dibatalkan")
