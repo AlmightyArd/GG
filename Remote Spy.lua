@@ -1,5 +1,5 @@
 --[[
-    Ard Hub Remote Spy  (v1.0.0)
+    Ard Hub Remote Spy  (v1.1.0)
     Mencatat remote di game mana pun, untuk membantu membuat script.
 
     - KELUAR (HP -> server): FireServer / InvokeServer, lewat hook yang hanya MENCATAT lalu meneruskan
@@ -14,9 +14,14 @@
     - Tombol filter: Semua / Keluar / Masuk. Jeda: berhenti merekam sementara.
     - Remote yang sama yang terpanggil berturut-turut digabung jadi satu baris (xN), supaya log tidak penuh.
     - Log juga disimpan ke workspace/ArdHub/remote_spy.txt
+    - Log tetap ada saat script dijalankan ulang (disimpan di workspace/ArdHub/remote_spy_log.json).
+    - Tetap jalan setelah pindah server / teleport (mis. lobby -> match), kalau script ini disimpan
+      sebagai file workspace/ArdHub/RemoteSpy.lua dan executor mendukung queue_on_teleport.
 ]]
 local MAX_ROWS = 300          -- baris yang disimpan & ditampilkan
 local HOOK_OUTGOING = true    -- false = hanya mencatat remote Masuk
+local SELF_FILE = "ArdHub/RemoteSpy.lua"        -- file script ini, untuk dijalankan ulang otomatis setelah teleport
+local LOG_FILE = "ArdHub/remote_spy_log.json"   -- log yang dipertahankan antar eksekusi / teleport
 local IGNORE = {              -- nama remote yang tidak dicatat sama sekali (isi sesuai game)
     -- RecorderBatch = true,
 }
@@ -168,6 +173,7 @@ local function code(v, indent, seen)
     return "nil --[[ " .. t .. ": " .. tostring(v) .. " ]]"
 end
 local function makeScript(e)
+    if e.script then return e.script end -- baris dari log tersimpan (sebelum teleport / eksekusi ulang)
     local path = pathOf(e.remote)
     local remoteLine = path and ("local remote = " .. path)
         or ("local remote = nil -- remote \"" .. e.name .. "\" tidak berada di dalam game (parent nil)")
@@ -297,6 +303,7 @@ local function record(kind, remote, args)
         -- panggilan yang sama berturut-turut: digabung, isinya diganti yang terbaru
         last.count = last.count + 1
         last.args, last.argsText, last.time = args, argsText, os.date("%H:%M:%S")
+        last.script = nil
         last.dirty = true
     else
         local okC, cls = pcall(function() return remote.ClassName end)
@@ -317,6 +324,9 @@ end
 
 local function esc(s) return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")) end
 local function rowText(e)
+    if e.kind == "---" then
+        return string.format('<font color="#7c5cff">[%s] --- %s ---</font>', e.time, esc(e.argsText))
+    end
     local color = e.kind == "IN" and "#86EFAC" or "#93C5FD"
     local kind = e.kind == "IN" and "IN    " or (e.kind == "FIRE" and "FIRE  " or "INVOKE")
     local args = e.argsText
@@ -325,6 +335,7 @@ local function rowText(e)
         e.time, color, kind, esc(e.name), esc(args), e.count > 1 and (' <font color="#9696a5">x' .. e.count .. "</font>") or "")
 end
 local function matches(e)
+    if e.kind == "---" then return true end
     if filter == "out" then return e.kind ~= "IN" end
     if filter == "in" then return e.kind == "IN" end
     return true
@@ -400,18 +411,66 @@ local function plainLog()
     end
     return table.concat(out, "\n")
 end
-task.spawn(function() -- simpan log ke file tiap 5 detik bila ada perubahan
+local HttpService = game:GetService("HttpService")
+local saveDirty = false
+-- JSONEncode menolak teks yang bukan UTF-8 (mis. isi buffer, atau teks terpotong di tengah huruf)
+local function utf8safe(text)
+    text = tostring(text or "")
+    if utf8.len(text) then return text end
+    return (text:gsub("[\128-\255]", "?"))
+end
+local function saveLog()
+    if not writefile then return end
+    local list = {}
+    for _, e in ipairs(entries) do
+        if e.kind ~= "---" and not e.script then
+            local ok, res = pcall(makeScript, e) -- dibuat sekarang, selagi remote & argumennya masih ada
+            if ok then e.script = res end
+        end
+        list[#list + 1] = {
+            kind = e.kind, name = utf8safe(e.name), className = e.className, time = e.time,
+            count = e.count, argsText = utf8safe(e.argsText), script = e.script and utf8safe(e.script) or nil,
+        }
+    end
+    pcall(function()
+        if makefolder and isfolder and not isfolder("ArdHub") then makefolder("ArdHub") end
+        writefile(LOG_FILE, HttpService:JSONEncode({ total = total, entries = list }))
+        writefile("ArdHub/remote_spy.txt", plainLog())
+    end)
+end
+task.spawn(function() -- simpan log ke file tiap 3 detik bila ada perubahan
     local lastTotal = -1
     while running do
-        task.wait(5)
-        if total ~= lastTotal and writefile then
-            lastTotal = total
-            pcall(function()
-                if makefolder and isfolder and not isfolder("ArdHub") then makefolder("ArdHub") end
-                writefile("ArdHub/remote_spy.txt", plainLog())
-            end)
+        task.wait(3)
+        if total ~= lastTotal or saveDirty then
+            lastTotal, saveDirty = total, false
+            saveLog()
         end
     end
+end)
+-- pulihkan log dari eksekusi / server sebelumnya
+pcall(function()
+    if not (readfile and isfile and isfile(LOG_FILE)) then return end
+    local data = HttpService:JSONDecode(readfile(LOG_FILE))
+    if type(data) ~= "table" or type(data.entries) ~= "table" then return end
+    for _, r in ipairs(data.entries) do
+        if type(r) == "table" and type(r.kind) == "string" then
+            entries[#entries + 1] = {
+                kind = r.kind, name = tostring(r.name or "?"), className = tostring(r.className or "?"),
+                time = tostring(r.time or ""), count = tonumber(r.count) or 1, argsText = tostring(r.argsText or ""),
+                script = type(r.script) == "string" and r.script or nil, restored = true,
+            }
+        end
+    end
+    total = tonumber(data.total) or #entries
+    if #entries > 0 then
+        entries[#entries + 1] = {
+            kind = "---", name = "", className = "", time = os.date("%H:%M:%S"), count = 1,
+            argsText = "Remote Spy jalan lagi (" .. (game.PlaceId and ("place " .. game.PlaceId) or "") .. ")",
+        }
+    end
+    while #entries > MAX_ROWS do table.remove(entries, 1) end
+    rebuild = true
 end)
 
 ---------------------------------------------------------------------
@@ -463,6 +522,7 @@ clearBtn.MouseButton1Click:Connect(function()
     table.clear(queue)
     selected = nil
     total = 0
+    saveDirty = true -- file log ikut dikosongkan
     uiDirty = true
 end)
 
@@ -591,7 +651,37 @@ end
 hint.Text = (HOOK_OUTGOING and (hookActive and ("Keluar: " .. hookCount .. " hook aktif") or "Keluar: hook gagal (executor tidak mendukung)")
     or "Keluar: dimatikan") .. "  ·  Ketuk baris lalu Salin = script siap pakai"
 
+---------------------------------------------------------------------
+-- tetap jalan setelah teleport (lobby -> match, pindah server)
+---------------------------------------------------------------------
+local queueTeleport = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+local selfSaved = false
+pcall(function() selfSaved = isfile and isfile(SELF_FILE) or false end)
+local reexecCode = 'if isfile and isfile("' .. SELF_FILE .. '") then loadstring(readfile("' .. SELF_FILE .. '"))() end'
+local function queueSelf()
+    if running and queueTeleport and selfSaved then pcall(queueTeleport, reexecCode) end
+end
+queueSelf()
+pcall(function()
+    conns[#conns + 1] = LocalPlayer.OnTeleport:Connect(function(state)
+        if state == Enum.TeleportState.Started then
+            saveLog() -- simpan log terakhir sebelum pindah
+            queueSelf()
+        end
+    end)
+end)
+local autoText
+if not queueTeleport then
+    autoText = "Auto lanjut setelah teleport: tidak didukung executor"
+elseif not selfSaved then
+    autoText = "Simpan script ini sebagai " .. SELF_FILE .. " supaya otomatis jalan lagi setelah teleport"
+else
+    autoText = "Auto lanjut setelah teleport: aktif"
+end
+hint.Text = hint.Text .. "  ·  " .. autoText
+
 local function stop()
+    pcall(saveLog)
     running = false
     hookActive = false
     for _, c in ipairs(conns) do pcall(c.Disconnect, c) end
