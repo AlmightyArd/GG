@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.3.1"
+local VERSION = "v1.3.3"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1426,7 +1426,7 @@ local Cfg = {
     spread = 0.3, placeMode = "Time",
     fpsLimit = 30, autoExec = false,
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
-    whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whQuest = true, whSummon = false,
+    whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whSummon = false,
     summary = false, summaryMinutes = 60,
     alertTarget = false, targetCoins = 0, targetGems = 0, tagTarget = true,
     telemetryUrl = "https://joljavywvuegtpeftlga.supabase.co/rest/v1/rpc/ard_telemetry?apikey=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpvbGphdnl3dnVlZ3RwZWZ0bGdhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MTEyNzQsImV4cCI6MjEwOTk4NzI3NH0.CV2fW0EQ4Pf_Ab-1zX0mwn34yuXwLKBM6Z-rGE8E0eM",
@@ -1541,14 +1541,19 @@ local function questInfo()
     end
     return out
 end
+local questCache = nil
 local function questLine()
     local qi = questInfo()
+    if qi.daily.total + qi.weekly.total == 0 then
+        return questCache or "Quest: belum terbaca (hanya ada di lobby)"
+    end
     local parts = {
         string.format("Daily %d/%d%s", qi.daily.done, qi.daily.total, (qi.daily.total > 0 and qi.daily.done == qi.daily.total) and " ✅" or ""),
         string.format("Weekly %d/%d%s", qi.weekly.done, qi.weekly.total, (qi.weekly.total > 0 and qi.weekly.done == qi.weekly.total) and " ✅" or ""),
     }
     for _, o in ipairs(qi.weekly.open) do parts[#parts + 1] = o end
-    return table.concat(parts, " · ")
+    questCache = table.concat(parts, " · ")
+    return questCache
 end
 
 -- Sesi: tetap dihitung lintas server (lobby <-> match) lewat file, reset kalau 30 menit tidak aktif
@@ -1684,7 +1689,9 @@ do
                 data = type(data) == "table" and data or {}
                 Session.matches = (Session.matches or 0) + 1
                 if data.won then Session.wins = (Session.wins or 0) + 1 else Session.losses = (Session.losses or 0) + 1 end
-                Session.coinsEarned = (Session.coinsEarned or 0) + (tonumber(data.coins) or 0)
+                data._coinPotion = (tonumber(attr("BoostCoinsEnd")) or 0) > os.time()
+                data._gain = (tonumber(data.coins) or 0) * (data._coinPotion and 2 or 1)
+                Session.coinsEarned = (Session.coinsEarned or 0) + data._gain
                 if data.won and tonumber(data.wave) and Match.map then
                     MapWaves[Match.map] = math.max(tonumber(MapWaves[Match.map]) or 0, tonumber(data.wave))
                     local enc = jsonEncode(MapWaves)
@@ -2765,10 +2772,9 @@ local function bar(cur, max)
     local f = (max and max > 0) and math.clamp(math.floor(cur / max * n + 0.5), 0, n) or 0
     return string.rep("▰", f) .. string.rep("▱", n - f)
 end
-local function maskName() return LocalPlayer.Name:sub(1, 4) .. "***" end
 local function sessionFooter()
-    return string.format("Sesi: %d match · %dW %dL · +%s coins · %s · %s · %s", Session.matches or 0, Session.wins or 0,
-        Session.losses or 0, comma(Session.coinsEarned or 0), sessionTime(), maskName(), VERSION)
+    return string.format("Sesi: %d match · %dW %dL · +%s coins · %s · %s", Session.matches or 0, Session.wins or 0,
+        Session.losses or 0, comma(Session.coinsEarned or 0), sessionTime(), VERSION)
 end
 local function mmss(s)
     s = math.floor(tonumber(s) or 0)
@@ -2779,7 +2785,7 @@ local function buildMatchEmbed(data)
     local wave = tonumber(data.wave) or 0
     local total = won and wave or tonumber(MapWaves[Match.map or ""])
     local dur = Match.lastTimer or (Match.started and (os.clock() - Match.started)) or nil
-    local lines = { string.format("%s · **Wave %s%s**%s", prettyMap(Match.map), wave, total and ("/" .. total) or "", dur and (" · " .. mmss(dur)) or "") }
+    local lines = { "||" .. LocalPlayer.Name .. "||", string.format("%s · **Wave %s%s**%s", prettyMap(Match.map), wave, total and ("/" .. total) or "", dur and (" · " .. mmss(dur)) or "") }
     local bars = {}
     if Cfg.whWave and total then bars[#bars + 1] = string.format("🌊 `Wave   %s %d/%d`", bar(wave, total), wave, total) end
     local bp = bpInfo()
@@ -2788,10 +2794,9 @@ local function buildMatchEmbed(data)
     if #bars > 0 then lines[#lines + 1] = "\n" .. table.concat(bars, "\n") end
     local fields = {}
     if Cfg.whCoins then
-        fields[#fields + 1] = { name = "🪙 Coins", value = string.format("+%s%s · %s", comma(data.coins), data.double and " (x2)" or "", comma(attr("Coins"))), inline = true }
+        fields[#fields + 1] = { name = "🪙 Coins", value = string.format("+%s%s · %s", comma(data._gain or data.coins), data._coinPotion and " (potion x2)" or "", comma(attr("Coins"))), inline = true }
         fields[#fields + 1] = { name = "💎 Gems", value = comma(attr("Gems")), inline = true }
     end
-    if Cfg.whQuest then fields[#fields + 1] = { name = "📜 Quest", value = questLine(), inline = false } end
     local embed = {
         author = { name = "Ard Hub · Dragon Tower Defense" },
         title = won and "🏆 Victory" or "💀 Defeat",
@@ -2832,14 +2837,13 @@ local function buildSummaryEmbed()
     }
     if m > 0 then fields[#fields + 1] = { name = "⏱️ Rata-rata", value = mmss((now.t - base.t) / m) .. " / match", inline = true } end
     if Cfg.whSummon then fields[#fields + 1] = { name = "🐉 Summon", value = tostring(now.summons - base.summons) .. "x", inline = true } end
-    if Cfg.whQuest then fields[#fields + 1] = { name = "📜 Quest", value = questLine(), inline = false } end
     local embed = {
         author = { name = "Ard Hub · Dragon Tower Defense" },
         title = string.format("📊 Ringkasan %d menit", mins),
-        description = table.concat(bars, "\n"),
+        description = "||" .. LocalPlayer.Name .. "||" .. (#bars > 0 and ("\n\n" .. table.concat(bars, "\n")) or ""),
         color = 0xA78BFA,
         fields = fields,
-        footer = { text = maskName() .. " · " .. VERSION },
+        footer = { text = VERSION },
         timestamp = DateTime.now():ToIsoDate(),
     }
     if Cfg.whAvatar and getAvatar() then embed.thumbnail = { url = avatarUrl } end
@@ -3197,7 +3201,7 @@ do
     sHook:AddButton("Test Send Webhook", function()
         if sendWebhook({
             author = { name = "Ard Hub · Dragon Tower Defense" }, title = "✅ Test Webhook",
-            description = "Webhook tersambung. Akun: " .. maskName(), color = 0xA78BFA,
+            description = "Webhook tersambung. Akun: ||" .. LocalPlayer.Name .. "||", color = 0xA78BFA,
             thumbnail = (Cfg.whAvatar and getAvatar()) and { url = avatarUrl } or nil,
             footer = { text = VERSION }, timestamp = DateTime.now():ToIsoDate(),
         }) then notify("Webhook terkirim") end
@@ -3220,7 +3224,7 @@ do
     for _, it in ipairs({
         { "whAvatar", "Avatar Roblox di thumbnail", true }, { "whWave", "Progress Bar Wave", true },
         { "whBP", "Progress Bar Battle Pass", true }, { "whDaily", "XP Harian", true },
-        { "whCoins", "Coins & Gems", true }, { "whQuest", "Progres Quest", true }, { "whSummon", "Hasil Summon", false },
+        { "whCoins", "Coins & Gems", true }, { "whSummon", "Hasil Summon", false },
     }) do
         Flag(it[1], sIsi:AddToggle(it[2], it[3], function(v) Cfg[it[1]] = v end), "toggle")
     end
