@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.2.1"
+local VERSION = "v1.3.1"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1424,7 +1424,7 @@ local Cfg = {
     autoSpeed = false, speed = 2,
     autoWalk = false, walkRadius = 6, walkMax = 9, antiAfk = true,
     spread = 0.3, placeMode = "Time",
-    fpsLimit = 30,
+    fpsLimit = 30, autoExec = false,
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
     whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whQuest = true, whSummon = false,
     summary = false, summaryMinutes = 60,
@@ -2698,6 +2698,32 @@ do
     end)
 end
 
+-- Auto Execute: script dijalankan lagi otomatis setelah teleport (lobby <-> match, saat loading map).
+-- Sumber script: file ArdHub/ArdHub_DTD.lua kalau ada, kalau tidak dari LOADER_URL.
+local LOADER_URL = "https://raw.githubusercontent.com/AlmightyArd/GG/refs/heads/main/ArdHub%20DTD.lua"
+local SELF_FILE = ROOT_DIR .. "/ArdHub_DTD.lua"
+do
+    local queued = false
+    function Perf.queueExec()
+        local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+        if not (Cfg.autoExec and q) or queued then return end
+        local code = 'task.wait(1) if isfile and isfile("' .. SELF_FILE .. '") then loadstring(readfile("' .. SELF_FILE .. '"))()'
+        if LOADER_URL ~= "" then code = code .. ' else loadstring(game:HttpGet("' .. LOADER_URL .. '"))()' end
+        code = code .. ' end'
+        if pcall(q, code) then queued = true end
+    end
+    function Perf.execSource()
+        local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+        if not q then return "Executor tidak mendukung queue_on_teleport" end
+        if isfile and isfile(SELF_FILE) then return "Sumber: file " .. SELF_FILE end
+        if LOADER_URL ~= "" then return "Sumber: link script" end
+        return "Simpan script ini ke workspace/" .. SELF_FILE .. " supaya bisa dijalankan ulang"
+    end
+    LocalPlayer.OnTeleport:Connect(function(st)
+        if alive and st == Enum.TeleportState.Started then Perf.queueExec() end
+    end)
+end
+
 -- =====================================================================
 -- WEBHOOK (gaya progress bar + avatar)
 -- =====================================================================
@@ -3131,6 +3157,15 @@ do
     Flag("lowGfx", sPerf:AddToggle("Low Graphics", false, function(v) Perf.lowGraphics(v) end), "toggle")
     Flag("hideFx", sPerf:AddToggle("Hide Attack Effects", false, function(v) Perf.hideFx(v) end), "toggle")
     Flag("hideEnemy", sPerf:AddToggle("Hide Enemy", false, function(v) Perf.hideEnemy(v) end), "toggle")
+    local sExec = tPerf:AddSection("Auto Execute", "left")
+    local execInfo
+    Flag("autoExec", sExec:AddToggle("Auto Execute", false, function(v)
+        Cfg.autoExec = v
+        if v then Perf.queueExec() end
+        if execInfo then execInfo.Text = v and Perf.execSource() or "Mati" end
+    end), "toggle")
+    execInfo = sExec:AddLabel("Mati")
+    sExec:AddLabel("Script langsung jalan lagi setelah pindah lobby <-> match (saat loading map), dengan setting yang sama.")
     local sFps = tPerf:AddSection("FPS", "left")
     local capToggle
     Flag("fpsLimit", sFps:AddSlider("FPS Limit", 15, 120, 30, " fps", function(v)
