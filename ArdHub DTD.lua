@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.0.0"
+local VERSION = "v1.2.1"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1417,13 +1417,13 @@ local function inMatch() return game.PlaceId ~= LOBBY_PLACE end
 local SAVE_DIR = ROOT_DIR .. "/DragonTD"
 local Cfg = {
     autoJoin = false, map = "Volcano Fortress", pad = 1, autoFriends = false,
-    autoExec = false, scriptUrl = "",
     autoSummon = false, summonAmount = 10, summonDelay = 1,
+    potionCoins = false, potionLuck = false, potionSpeed = false,
     claimQuest = false, claimBonus = false, claimPlaytime = false, claimIndex = false, claimBP = false,
     autoStart = false, autoSkip = false, autoAgain = false, autoReturn = false, returnEvery = 10,
-    autoTarget = false, target = "First",
+    autoSpeed = false, speed = 2,
     autoWalk = false, walkRadius = 6, walkMax = 9, antiAfk = true,
-    spread = 0.3, placeMode = "Time", skipMissing = true,
+    spread = 0.3, placeMode = "Time",
     fpsLimit = 30,
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
     whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whQuest = true, whSummon = false,
@@ -1888,21 +1888,10 @@ task.spawn(function()
     end
 end)
 
--- Auto Execute setelah teleport (lobby <-> match)
-local function queueExec()
-    local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
-    local url = tostring(Cfg.scriptUrl or "")
-    if not (Cfg.autoExec and q and url:match("^https?://")) then return end
-    pcall(q, 'loadstring(game:HttpGet("' .. url:gsub('"', "") .. '"))()')
-end
-LocalPlayer.OnTeleport:Connect(function(st)
-    if alive and st == Enum.TeleportState.Started then queueExec() end
-end)
-
 -- Auto Summon
 task.spawn(function()
     while alive do
-        task.wait(math.max(tonumber(Cfg.summonDelay) or 1, 0.3))
+        task.wait(math.max(tonumber(Cfg.summonDelay) or 1, 1))
         if Cfg.autoSummon and isLobby() then
             local n = tonumber(Cfg.summonAmount) == 1 and 1 or 10
             local ok, res, msg, list = callRemote("Summon", n)
@@ -1915,11 +1904,43 @@ task.spawn(function()
                 LobbyStatus.lastSummon = type(list) == "table" and table.concat(list, ", ") or nil
                 LobbyStatus.summon = string.format("Status: summon %dx · total sesi %s", n, comma(Session.summonCount))
             else
-                LobbyStatus.summon = "Status: gagal · " .. tostring(ok and (msg or res) or res)
-                task.wait(10)
+                local why = tostring(ok and (msg or res) or res)
+                if why:lower():find("hatch", 1, true) or why:lower():find("wait", 1, true) then
+                    -- animasi telur menetas belum selesai: coba lagi sebentar lagi, bukan gagal
+                    LobbyStatus.summon = "Status: menunggu telur menetas..."
+                else
+                    LobbyStatus.summon = "Status: gagal · " .. why
+                    task.wait(10)
+                end
             end
         elseif not Cfg.autoSummon then
             LobbyStatus.summon = "Status: mati"
+        end
+    end
+end)
+
+-- Auto Drink Potion: diminum saat efeknya habis dan stok masih ada.
+-- Coins & Speed hanya diminum saat match berjalan (efeknya untuk match), Luck kapan saja (untuk summon).
+local POTIONS = {
+    { key = "coins", cfg = "potionCoins", stock = "PotionCoins", ends = "BoostCoinsEnd", matchOnly = true },
+    { key = "luck", cfg = "potionLuck", stock = "PotionLuck", ends = "BoostLuckEnd", matchOnly = false },
+    { key = "speed", cfg = "potionSpeed", stock = "PotionSpeed", ends = "BoostSpeedEnd", matchOnly = true },
+}
+task.spawn(function()
+    local lastTry = {}
+    while alive do
+        task.wait(3)
+        for _, p in ipairs(POTIONS) do
+            if Cfg[p.cfg] and (not p.matchOnly or (inMatch() and matchRunning())) then
+                pcall(function()
+                    local active = (tonumber(attr(p.ends)) or 0) > os.time() + 5
+                    local stock = tonumber(attr(p.stock)) or 0
+                    if active or stock <= 0 or os.clock() - (lastTry[p.key] or -99) < 30 then return end
+                    lastTry[p.key] = os.clock()
+                    local ok, res, msg = callRemote("Potion", "drink", p.key)
+                    if ok and res == true then notify("Potion: " .. tostring(msg or p.key)) end
+                end)
+            end
         end
     end
 end)
@@ -2052,25 +2073,28 @@ MatchEndedEv.Event:Connect(function()
     task.delay(4, function()
         if not alive or Match.endedAt ~= endedAt or Match.lastCamera > endedAt then return end
         if Cfg.autoReturn and Match.count >= math.max(tonumber(Cfg.returnEvery) or 1, 1) then
-            queueExec()
             callRemote("ReturnToLobby")
         elseif Cfg.autoAgain then
             callRemote("PlayAgain")
         end
     end)
 end)
--- Auto Set Target: setiap naga baru (termasuk model baru setelah evolusi) diberi target default
+-- Auto Set Speed: kecepatan game dikirim sekali setiap match berjalan (dan saat pilihan diubah)
+local speedSent = { match = nil, speed = nil }
 task.spawn(function()
-    local folder = inMatch() and workspace:WaitForChild("Dragons", 60)
-    if not folder then return end
-    local done = setmetatable({}, { __mode = "k" })
-    folder.ChildAdded:Connect(function(m)
-        task.wait(0.6)
-        if alive and Cfg.autoTarget and not done[m] and m.Parent then
-            done[m] = true
-            callRemote("SetTarget", m, Cfg.target)
+    while alive do
+        task.wait(1)
+        if Cfg.autoSpeed and inMatch() and matchRunning() then
+            local key = Match.started or Match.scriptStart
+            -- x4 hanya bisa saat Speed Potion aktif (atribut BoostSpeedEnd); tanpa potion dipakai x2
+            local want = Cfg.speed
+            if want == 4 and not ((tonumber(attr("BoostSpeedEnd")) or 0) > os.time()) then want = 2 end
+            if speedSent.match ~= key or speedSent.speed ~= want then
+                speedSent.match, speedSent.speed = key, want
+                callRemote("SetSpeed", want)
+            end
         end
-    end)
+    end
 end)
 -- Auto Walk: tiap 4 detik s/d interval maksimal, berjalan ke dekat salah satu naga (geseran acak sampai radius)
 task.spawn(function()
@@ -2477,7 +2501,7 @@ local function runMacro(list, token)
                     else
                         local low = type(msg) == "string" and msg:lower() or ""
                         Macro.status = string.format("Place #%s %s: %s", tostring(a.ID), tostring(a.Dragon), msg ~= nil and tostring(msg) or "menunggu cash")
-                        if Cfg.skipMissing and (low:find("don't have", 1, true) or low:find("dont have", 1, true) or low:find("max", 1, true)) then
+                        if (low:find("don't have", 1, true) or low:find("dont have", 1, true) or low:find("max", 1, true)) then
                             if a.ID then skipped[a.ID] = true end
                             notify(string.format("Place %s dilewati: %s", tostring(a.Dragon), tostring(msg)))
                             break
@@ -2892,18 +2916,12 @@ do
     end))
     Flag("autoJoin", sJoin:AddToggle("Auto Join Map (jalan ke pad)", false, function(v) Cfg.autoJoin = v end), "toggle")
     Flag("autoFriends", sJoin:AddToggle("Auto Friends Only", false, function(v) Cfg.autoFriends = v end), "toggle")
-    sJoin:AddDivider()
-    Flag("scriptUrl", sJoin:AddInput("Link Script (Auto Execute)", "https://.../ardhub_dtd.lua", "", function(t)
-        Cfg.scriptUrl = tostring(t)
-    end, false), "input")
-    Flag("autoExec", sJoin:AddToggle("Auto Execute setelah teleport", false, function(v) Cfg.autoExec = v end), "toggle")
-    sJoin:AddLabel("Script dijalankan ulang otomatis setelah pindah lobby <-> match, memakai link di atas.")
 
     local sSum = tLobby:AddSection("Auto Summon", "left")
     Flag("summonAmount", sSum:AddDropdown("Summon", { "1x", "10x" }, "10x", function(v)
         Cfg.summonAmount = (v == "1x") and 1 or 10
     end))
-    Flag("summonDelay", sSum:AddSlider("Delay Summon", 0.5, 5, 1, " detik", function(v) Cfg.summonDelay = v end, 0.5))
+    Flag("summonDelay", sSum:AddSlider("Delay Summon", 1, 5, 1, " detik", function(v) Cfg.summonDelay = math.max(v, 1) end, 0.5))
     local sumStatus = sSum:AddLabel("Status: mati")
     Flag("autoSummon", sSum:AddToggle("Auto Summon", false, function(v) Cfg.autoSummon = v end), "toggle")
     sSum:AddDivider()
@@ -2913,6 +2931,27 @@ do
             if attr("AutoSell" .. r) ~= v then callRemote("SetSetting", "sell" .. r, v) end
         end)
     end
+
+    local sPot = tLobby:AddSection("Auto Potion", "right")
+    Flag("potionCoins", sPot:AddToggle("Auto Coins Potion", false, function(v) Cfg.potionCoins = v end), "toggle")
+    Flag("potionLuck", sPot:AddToggle("Auto Luck Potion", false, function(v) Cfg.potionLuck = v end), "toggle")
+    Flag("potionSpeed", sPot:AddToggle("Auto 4x Speed Potion", false, function(v) Cfg.potionSpeed = v end), "toggle")
+    local potStatus = sPot:AddLabel("-")
+    sPot:AddLabel("Diminum saat efeknya habis dan stok masih ada. Coins & Speed hanya saat match berjalan, Luck kapan saja.")
+    task.spawn(function()
+        while alive do
+            pcall(function()
+                local parts = {}
+                for _, p in ipairs(POTIONS) do
+                    local left = (tonumber(attr(p.ends)) or 0) - os.time()
+                    parts[#parts + 1] = string.format("%s: %s · %s", p.key:sub(1, 1):upper() .. p.key:sub(2), comma(attr(p.stock)),
+                        left > 0 and (math.floor(left / 60) .. "m aktif") or "mati")
+                end
+                potStatus.Text = table.concat(parts, "\n")
+            end)
+            task.wait(2)
+        end
+    end)
 
     local sInfo = tLobby:AddSection("Info Akun", "right")
     local infoBP = sInfo:AddLabel("Battle Pass: -")
@@ -2961,11 +3000,12 @@ do
     end, true), "input")
     sMatch:AddLabel("Auto Return lebih diutamakan dari Play Again saat jumlah match di server ini sudah tercapai.")
 
-    local sDragon = tMatch:AddSection("Dragon", "left")
-    Flag("target", sDragon:AddDropdown("Target Default", { "First", "Last", "Strongest", "Weakest", "Closest", "Random" }, "First", function(v)
-        Cfg.target = v
+    local sSpeed = tMatch:AddSection("Game Speed", "left")
+    Flag("speed", sSpeed:AddDropdown("Speed", { "x2", "x3", "x4" }, "x2", function(v)
+        Cfg.speed = tonumber(tostring(v):match("%d+")) or 2
     end))
-    Flag("autoTarget", sDragon:AddToggle("Auto Set Target", false, function(v) Cfg.autoTarget = v end), "toggle")
+    Flag("autoSpeed", sSpeed:AddToggle("Auto Set Speed", false, function(v) Cfg.autoSpeed = v end), "toggle")
+    sSpeed:AddLabel("x4 hanya aktif saat Speed Potion menyala; tanpa potion otomatis x2. x3 butuh gamepass.")
 
     local sPlayer = tMatch:AddSection("Player", "right")
     Flag("autoWalk", sPlayer:AddToggle("Auto Walk", false, function(v) Cfg.autoWalk = v end), "toggle")
@@ -3080,7 +3120,7 @@ do
     Flag("placeMode", sPlace:AddDropdown("Mode Placement", { "Time", "Wave", "Money" }, "Time", function(v) Cfg.placeMode = v end))
     sPlace:AddLabel("Time: sesuai detik rekaman. Wave: sesuai wave saat direkam. Money: langsung begitu cash cukup, urutan tetap.")
     Flag("spread", sPlace:AddSlider("Placement Spread", 0, 2, 0.3, " studs", function(v) Cfg.spread = v end, 0.1))
-    Flag("skipMissing", sPlace:AddToggle("Lewati naga yang tidak dimiliki / Max", true, function(v) Cfg.skipMissing = v end), "toggle")
+    sPlace:AddLabel("Naga yang tidak dimiliki atau kena batas \"Max\" otomatis dilewati.")
 end
 
 -- ---------------- Performance ----------------
