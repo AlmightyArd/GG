@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.3.3"
+local VERSION = "v1.4.0"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -3161,6 +3161,33 @@ do
     Flag("lowGfx", sPerf:AddToggle("Low Graphics", false, function(v) Perf.lowGraphics(v) end), "toggle")
     Flag("hideFx", sPerf:AddToggle("Hide Attack Effects", false, function(v) Perf.hideFx(v) end), "toggle")
     Flag("hideEnemy", sPerf:AddToggle("Hide Enemy", false, function(v) Perf.hideEnemy(v) end), "toggle")
+    -- Ukuran teks: semua teks di jendela Ard Hub ditambah N poin dari ukuran aslinya
+    local sView = tPerf:AddSection("Tampilan", "left")
+    local baseSize = setmetatable({}, { __mode = "k" })
+    local textDelta = 0
+    local function applyText(d)
+        if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            if not baseSize[d] then baseSize[d] = d.TextSize end
+            d.TextSize = baseSize[d] + textDelta
+        end
+    end
+    local function applyAll()
+        for _, root in ipairs({ Gui, StatusGui }) do
+            for _, d in ipairs(root:GetDescendants()) do pcall(applyText, d) end
+        end
+    end
+    for _, root in ipairs({ Gui, StatusGui }) do
+        root.DescendantAdded:Connect(function(d)
+            task.defer(function() if textDelta ~= 0 then pcall(applyText, d) end end)
+        end)
+    end
+    Flag("textSize", sView:AddSlider("Ukuran Teks", 0, 6, 2, "", function(v)
+        textDelta = math.floor(tonumber(v) or 0)
+        applyAll()
+    end))
+    sView:AddLabel("Menambah ukuran semua teks di Ard Hub (0 = ukuran asli).")
+    textDelta = 2 -- bawaan +2
+    task.defer(applyAll)
     local sExec = tPerf:AddSection("Auto Execute", "left")
     local execInfo
     Flag("autoExec", sExec:AddToggle("Auto Execute", false, function(v)
