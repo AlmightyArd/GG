@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.7.0"
+local VERSION = "v1.7.1"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -2275,7 +2275,7 @@ do
                 -- belum pecah (chest / egg / blok keras butuh beberapa pukulan): pukul lagi blok yang sama
                 Mine.hits[id] = (Mine.hits[id] or 0) + 1
                 if Mine.pending == id then Mine.rejected = id end
-                if Mine.hits[id] > 40 then Mine.failed[id] = os.clock() end
+
             end
             for _, it in ipairs(type(items) == "table" and items or {}) do
                 if type(it) == "table" and tonumber(it[1]) and not Mine.dug[tonumber(it[1])] then
@@ -2481,7 +2481,20 @@ task.spawn(function()
                     Mine.status = string.format("Blok %d tidak dibalas (%dx)", id, Mine.fails)
                     if Mine.fails >= 5 then task.wait(5) Mine.fails = 0 end
                 elseif Mine.rejected == id then
-                    Mine.status = string.format("Pukul %d (%s) · %dx", id, why, Mine.hits[id] or 0)
+                    -- dibalas "false": bisa berarti belum pecah, bisa juga posisi kurang pas.
+                    -- Setelah 2x: maju sampai tepat di sebelah blok. Batas: item 12x, blok biasa 4x, lalu dilewati 2 menit.
+                    local n = Mine.hits[id] or 0
+                    local _, _, hrp = charParts()
+                    local part = mineBlocks() and mineBlocks():FindFirstChild("B" .. id)
+                    local dist = (hrp and part and part:IsA("BasePart")) and (hrp.Position - part.Position).Magnitude or -1
+                    if n >= 2 then Mine.closeNeeded[id] = true end
+                    if n >= (Mine.items[id] and 12 or 4) then
+                        Mine.failed[id] = os.clock()
+                        Mine.hits[id] = nil
+                        Mine.status = string.format("Blok %d tetap false setelah %dx (jarak %.1f), dilewati 2 menit", id, n, dist)
+                    else
+                        Mine.status = string.format("Pukul %d (%s) · %dx · jarak %.1f", id, why, n, dist)
+                    end
                 else
                     Mine.fails = 0
                     Mine.status = string.format("Gali %d (%s) · lapisan %d · %.2f dtk", id, why, math.floor(id / 100) + 1, mineDigTime())
