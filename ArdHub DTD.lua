@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.6.0"
+local VERSION = "v1.7.0"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1413,8 +1413,10 @@ end
 -- =====================================================================
 local LOBBY_PLACE = 103076556916764
 local function isLobby() return game.PlaceId == LOBBY_PLACE end
-local MATCH_PLACE = 90749532382026
-local function inMatch() return game.PlaceId == MATCH_PLACE end
+-- server match = bukan lobby dan bukan Mine (tiap map bisa punya PlaceId sendiri)
+local function inMatch()
+    return game.PlaceId ~= LOBBY_PLACE and workspace:FindFirstChild("MyMinePit") == nil
+end
 local SAVE_DIR = ROOT_DIR .. "/DragonTD"
 local Cfg = {
     autoJoin = false, map = "Volcano Fortress", pad = 1, autoFriends = false,
@@ -1426,7 +1428,7 @@ local Cfg = {
     autoWalk = false, walkRadius = 6, walkMax = 9, antiAfk = true,
     spread = 0.3, placeMode = "Time",
     fpsLimit = 30, autoExec = false,
-    autoMine = false, autoDig = false, mineDelay = 0,
+    autoMine = false, autoDig = false, mineDelay = 0, minePattern = "Lorong",
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
     whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whSummon = false,
     summary = false, summaryMinutes = 60,
@@ -2160,6 +2162,98 @@ local function mineDigTime()
     digTimeCache, digTimeAt = t or 1.2, os.clock()
     return digTimeCache
 end
+-- Data Mine: setiap blok yang isinya sudah terlihat dan setiap item dicatat per lapisan, untuk dianalisis
+-- (lapisan mana yang paling sering berisi item, berapa peluang item per blok).
+-- File: ArdHub/DragonTD/mine_data.json (gabungan semua sesi) dan mine_items.csv (daftar item satu per baris).
+local MINE_DATA_FILE = SAVE_DIR .. "/mine_data.json"
+local MINE_CSV_FILE = SAVE_DIR .. "/mine_items.csv"
+local MineData = jsonDecode(safeRead(MINE_DATA_FILE))
+if type(MineData) ~= "table" then MineData = {} end
+MineData.sessions = tonumber(MineData.sessions) or 0
+MineData.layers = type(MineData.layers) == "table" and MineData.layers or {}
+MineData.kinds = type(MineData.kinds) == "table" and MineData.kinds or {}
+MineData.seen = tonumber(MineData.seen) or 0
+MineData.items = tonumber(MineData.items) or 0
+MineData.digs = tonumber(MineData.digs) or 0
+local mineKnown, mineCounted = {}, {}
+local mineDataDirty, mineSessionOn = false, false
+local function layerRow(L)
+    local key = tostring(L)
+    local row = MineData.layers[key]
+    if type(row) ~= "table" then row = { seen = 0, items = 0, kinds = {} } MineData.layers[key] = row end
+    row.kinds = type(row.kinds) == "table" and row.kinds or {}
+    return row
+end
+local function markKnown(id)
+    if mineKnown[id] then return end
+    mineKnown[id] = true
+    local row = layerRow(math.floor(id / 100) + 1)
+    row.seen = (tonumber(row.seen) or 0) + 1
+    MineData.seen = MineData.seen + 1
+    mineDataDirty = true
+end
+local function markItem(id, kind)
+    if mineCounted[id] then return end
+    mineCounted[id] = true
+    local L = math.floor(id / 100) + 1
+    local row = layerRow(L)
+    row.items = (tonumber(row.items) or 0) + 1
+    row.kinds[kind] = (tonumber(row.kinds[kind]) or 0) + 1
+    MineData.items = MineData.items + 1
+    MineData.kinds[kind] = (tonumber(MineData.kinds[kind]) or 0) + 1
+    mineDataDirty = true
+    local line = string.format("%s,%d,%d,%s,%s\n", os.date("%Y-%m-%d %H:%M:%S"), L, id, kind, tostring(Cfg.minePattern))
+    pcall(function()
+        safeMakeDir(SAVE_DIR)
+        if appendfile and isfile and isfile(MINE_CSV_FILE) then appendfile(MINE_CSV_FILE, line)
+        else safeWrite(MINE_CSV_FILE, "waktu,lapisan,blok,jenis,pola\n" .. line) end
+    end)
+end
+local function saveMineData()
+    if not mineDataDirty then return end
+    mineDataDirty = false
+    safeMakeDir(SAVE_DIR)
+    local enc = jsonEncode(MineData)
+    if enc then safeWrite(MINE_DATA_FILE, enc) end
+end
+task.spawn(function()
+    while alive do
+        task.wait(20)
+        if inMine and inMine() and not mineSessionOn then
+            mineSessionOn = true
+            MineData.sessions = MineData.sessions + 1
+            mineDataDirty = true
+        end
+        pcall(saveMineData)
+    end
+end)
+-- ringkasan untuk UI: peluang item per blok, dan kelompok 5 lapisan dengan peluang tertinggi
+local function mineDataSummary()
+    local per = MineData.items > 0 and (MineData.seen / MineData.items) or nil
+    local groups = {}
+    for key, row in pairs(MineData.layers) do
+        local g = math.floor(((tonumber(key) or 1) - 1) / 5)
+        groups[g] = groups[g] or { seen = 0, items = 0 }
+        groups[g].seen = groups[g].seen + (tonumber(row.seen) or 0)
+        groups[g].items = groups[g].items + (tonumber(row.items) or 0)
+    end
+    local best, bestRate = nil, -1
+    for g, v in pairs(groups) do
+        if v.seen >= 50 then
+            local rate = v.items / v.seen
+            if rate > bestRate then best, bestRate = g, rate end
+        end
+    end
+    local kinds = {}
+    for k, n in pairs(MineData.kinds) do kinds[#kinds + 1] = k .. " " .. n end
+    table.sort(kinds)
+    return string.format("Data %d sesi: %s blok terlihat · %s item%s\nJenis: %s%s", MineData.sessions, comma(MineData.seen),
+        comma(MineData.items), per and string.format(" (1 per %.0f blok)", per) or "",
+        #kinds > 0 and table.concat(kinds, ", ") or "-",
+        best and string.format("\nLapisan terbaik sejauh ini: %d-%d (1 per %.0f blok)", best * 5 + 1, best * 5 + 5, 1 / math.max(bestRate, 1e-9)) or "")
+end
+Mine.dataSummary = mineDataSummary
+
 -- remote masuk MineMsg
 do
     local function onMsg(kind, ...)
@@ -2173,6 +2267,10 @@ do
                 Mine.dug[id] = true
                 Mine.items[id] = nil
                 Mine.hits[id] = nil
+                -- blok ini dan semua tetangganya sekarang sudah diketahui isinya
+                MineData.digs = MineData.digs + 1
+                markKnown(id)
+                for _, n in ipairs(mineNeighbors(id)) do markKnown(n) end
             elseif id then
                 -- belum pecah (chest / egg / blok keras butuh beberapa pukulan): pukul lagi blok yang sama
                 Mine.hits[id] = (Mine.hits[id] or 0) + 1
@@ -2182,6 +2280,7 @@ do
             for _, it in ipairs(type(items) == "table" and items or {}) do
                 if type(it) == "table" and tonumber(it[1]) and not Mine.dug[tonumber(it[1])] then
                     Mine.items[tonumber(it[1])] = tostring(it[2])
+                    markItem(tonumber(it[1]), tostring(it[2]))
                     Mine.lastItems[#Mine.lastItems + 1] = tostring(it[2])
                     if #Mine.lastItems > 6 then table.remove(Mine.lastItems, 1) end
                 end
@@ -2210,7 +2309,28 @@ local function zigKey(id)
     local ec = (er % 2 == 0) and c or (9 - c)
     return L * 100 + er * 10 + ec
 end
--- item terlihat (terdekat) dulu, lalu blok berikutnya dalam urutan zig-zag
+-- Pola Lorong: di setiap lapisan hanya digali jalur ular baris 0, 3, 6, 9 + penghubung di ujungnya
+-- (46 blok per lapisan, sisanya tetap terlihat dari samping). Lapisan berikutnya mulai tepat di bawah ujung terakhir.
+local LORONG = {}
+do
+    local path = {}
+    local function row(r, rev) for i = 0, 9 do path[#path + 1] = r * 10 + (rev and (9 - i) or i) end end
+    row(0, false); path[#path + 1] = 19; path[#path + 1] = 29
+    row(3, true); path[#path + 1] = 40; path[#path + 1] = 50
+    row(6, false); path[#path + 1] = 79; path[#path + 1] = 89
+    row(9, true)
+    for i, cell in ipairs(path) do
+        LORONG[cell] = i -- urutan di lapisan genap; lapisan ganjil dibalik
+    end
+end
+local function lorongKey(id)
+    local L, cell = math.floor(id / 100), id % 100
+    local i = LORONG[cell]
+    if not i then return nil end
+    if L % 2 == 1 then i = 47 - i end
+    return L * 100 + i
+end
+-- item terlihat (terdekat) dulu, lalu blok berikutnya sesuai pola (Lorong / Zig-zag)
 local function minePick()
     local f = mineBlocks()
     if not f then return nil end
@@ -2229,6 +2349,14 @@ local function minePick()
         end
     end
     if bestItem then return bestItem, "ambil " .. Mine.items[bestItem] end
+    if Cfg.minePattern == "Lorong" then
+        local best, bestK = nil, nil
+        for _, id in ipairs(list) do
+            local k = lorongKey(id)
+            if k and (not bestK or k < bestK) then best, bestK = id, k end
+        end
+        if best then return best, "lorong" end
+    end
     table.sort(list, function(a, b) return zigKey(a) < zigKey(b) end)
     if not list[1] then return nil end
     return list[1], "urut"
@@ -2299,7 +2427,7 @@ task.spawn(function()
                 if Cfg.autoMine then Mine.status = "Menunggu Mine buka · " .. Mine.schedule end
                 return
             end
-            if inMatch() and os.clock() - lastLeave > 15 then
+            if inMatch() and os.clock() - lastLeave > 15 and os.clock() - Match.scriptStart > 15 then
                 -- keluar dari match ke lobby (tombol Lobby; kalau tidak diterima, teleport ke lobby)
                 lastLeave = os.clock()
                 Mine.status = "Mine buka: keluar ke lobby"
@@ -3485,7 +3613,8 @@ do
     sMine:AddLabel("Menunggu Mine buka. Saat buka: keluar dari match ke lobby, masuk Mine, lalu gali otomatis. Setelah Mine selesai, Auto Join map / Play Macro jalan lagi. Nyalakan Auto Execute (tab Performance) supaya script ikut jalan setelah pindah server.")
     local sched = sMine:AddLabel("Jadwal: -")
     Flag("autoDig", sMine:AddToggle("Auto Dig (saat sudah di Mine)", false, function(v) Cfg.autoDig = v end), "toggle")
-    sMine:AddLabel("Urutan zig-zag lapis per lapis; item yang terlihat (chest, egg, dll.) dipukul duluan sampai pecah. Karakter berjalan ke setiap blok.")
+    Flag("minePattern", sMine:AddDropdown("Pola Gali", { "Lorong", "Zig-zag" }, "Lorong", function(v) Cfg.minePattern = v end))
+    sMine:AddLabel("Lorong: hanya jalur baris 0, 3, 6, 9 yang digali (46 blok/lapisan), blok lain tetap terlihat isinya dari samping, jadi lebih cepat turun dan lebih banyak blok terlihat. Zig-zag: semua blok digali. Item yang terlihat selalu dipukul duluan.")
     Flag("mineDelay", sMine:AddSlider("Jeda Tambahan", 0, 2, 0, " detik", function(v) Cfg.mineDelay = v end, 0.1))
     local st = sMine:AddLabel("Status: mati")
     local sPool = tMine:AddSection("Sisa Harta (semua server)", "right")
@@ -3495,11 +3624,15 @@ do
     local items = sFind:AddLabel("-")
     local news = sFind:AddLabel("-")
     local raw = sFind:AddLabel("-")
+    local sData = tMine:AddSection("Data Mine", "right")
+    local dataL = sData:AddLabel("-")
+    sData:AddLabel("Tersimpan di ArdHub/DragonTD/mine_data.json dan mine_items.csv untuk dianalisis.")
     task.spawn(function()
         while alive do
             pcall(function()
                 st.Text = "Status: " .. tostring(Mine.status)
-                sched.Text = "Jadwal Mine: " .. tostring(Mine.schedule)
+                sched.Text = string.format("Jadwal Mine: %s\nServer: %s (PlaceId %s)", tostring(Mine.schedule),
+                    inMine() and "Mine" or isLobby() and "Lobby" or "Match", tostring(game.PlaceId))
                 local ms = mineState()
                 if ms then
                     local left = (tonumber(ms.EndsAt) or 0) - os.time()
@@ -3520,6 +3653,7 @@ do
                 items.Text = string.format("Item terlihat: %d · Terakhir: %s", open, #Mine.lastItems > 0 and table.concat(Mine.lastItems, ", ") or "-")
                 news.Text = "Kabar: " .. tostring(Mine.news or "-")
                 raw.Text = "[diag] " .. (#Mine.raw > 0 and table.concat(Mine.raw, " | ") or "-")
+                dataL.Text = Mine.dataSummary()
             end)
             task.wait(1)
         end
