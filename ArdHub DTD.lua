@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.7.1"
+local VERSION = "v1.8.0"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1419,7 +1419,7 @@ local function inMatch()
 end
 local SAVE_DIR = ROOT_DIR .. "/DragonTD"
 local Cfg = {
-    autoJoin = false, map = "Volcano Fortress", pad = 1, autoFriends = false,
+    autoJoin = false, map = "Volcano Fortress", pad = 1, turkeyPad = 4, autoFriends = false,
     autoSummon = false, summonAmount = 10, summonDelay = 1,
     potionCoins = false, potionLuck = false, potionSpeed = false,
     claimQuest = false, claimBonus = false, claimPlaytime = false, claimIndex = false, claimBP = false,
@@ -1789,14 +1789,15 @@ end
 local inMine -- diisi di bagian MINE
 local mineBusy = function() return false end -- true saat di Mine / Auto Mine sedang mengejar Mine
 local MAP_PAD = { ["Castle Town"] = 1, ["Sunny Meadow"] = 4, ["Pirate Cove"] = 7, ["Snowy Summit"] = 10, ["Volcano Fortress"] = 13 }
-local MAP_LIST = { "Castle Town", "Sunny Meadow", "Pirate Cove", "Snowy Summit", "Volcano Fortress" }
+local MAP_LIST = { "Castle Town", "Sunny Meadow", "Pirate Cove", "Snowy Summit", "Volcano Fortress", "Turkey (event)" }
+local TURKEY_DIFF = { "Easy", "Normal", "Hard", "Nightmare" } -- PlayPadTurkey1..4
 local LobbyStatus = { summon = "Status: mati", lastSummon = nil }
 local padCache = nil
 local function allPads()
     if not padCache or #padCache == 0 then
         padCache = {}
         for _, d in ipairs(workspace:GetDescendants()) do
-            if d.Name:match("^PlayPad%d+$") then padCache[#padCache + 1] = d end
+            if d.Name:match("^PlayPad%d+$") or d.Name:match("^PlayPadTurkey%d+$") then padCache[#padCache + 1] = d end
         end
     end
     return padCache
@@ -1851,12 +1852,30 @@ end
 task.spawn(function()
     task.wait(5) -- beri waktu Auto Claim jalan dulu
     local since, lastDist = nil, nil
+    local lastHall = 0
     while alive do
         task.wait(1)
         if Cfg.autoJoin and isLobby() and not mineBusy() then
             pcall(function()
-                local name = "PlayPad" .. tostring((MAP_PAD[Cfg.map] or 1) + (math.clamp(tonumber(Cfg.pad) or 1, 1, 3) - 1))
+                local name
+                if Cfg.map == "Turkey (event)" then
+                    name = "PlayPadTurkey" .. tostring(math.clamp(tonumber(Cfg.turkeyPad) or 4, 1, 4))
+                else
+                    name = "PlayPad" .. tostring((MAP_PAD[Cfg.map] or 1) + (math.clamp(tonumber(Cfg.pad) or 1, 1, 3) - 1))
+                end
                 local pad = padByName(name)
+                -- pad event Turkey ada di dalam Turkey Hall: masuk dulu lewat TurkeyHall("enter")
+                if Cfg.map == "Turkey (event)" and os.clock() - lastHall > 20 then
+                    local _, _, hrp0 = charParts()
+                    local p0 = pad and pivotOf(pad)
+                    if not p0 or (hrp0 and flatDist(p0, hrp0.Position) > 150) then
+                        lastHall = os.clock()
+                        callRemote("TurkeyHall", "enter")
+                        padCache = nil
+                        task.wait(2)
+                        pad = padByName(name)
+                    end
+                end
                 local _, hum, hrp = charParts()
                 if not (pad and hum and hrp) then return end
                 local pos = pivotOf(pad)
@@ -3406,6 +3425,9 @@ do
     local tLobby = AddTab("Lobby")
     local sJoin = tLobby:AddSection("Auto Join", "left")
     Flag("map", sJoin:AddDropdown("Map", MAP_LIST, Cfg.map, function(v) Cfg.map = v end))
+    Flag("turkeyPad", sJoin:AddDropdown("Difficulty (Turkey)", TURKEY_DIFF, "Nightmare", function(v)
+        for i, n in ipairs(TURKEY_DIFF) do if n == v then Cfg.turkeyPad = i end end
+    end))
     Flag("pad", sJoin:AddDropdown("Pad", { "Pad 1", "Pad 2", "Pad 3" }, "Pad 1", function(v)
         Cfg.pad = tonumber(tostring(v):match("%d+")) or 1
     end))
