@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.4.0"
+local VERSION = "v1.6.0"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1413,7 +1413,8 @@ end
 -- =====================================================================
 local LOBBY_PLACE = 103076556916764
 local function isLobby() return game.PlaceId == LOBBY_PLACE end
-local function inMatch() return game.PlaceId ~= LOBBY_PLACE end
+local MATCH_PLACE = 90749532382026
+local function inMatch() return game.PlaceId == MATCH_PLACE end
 local SAVE_DIR = ROOT_DIR .. "/DragonTD"
 local Cfg = {
     autoJoin = false, map = "Volcano Fortress", pad = 1, autoFriends = false,
@@ -1425,6 +1426,7 @@ local Cfg = {
     autoWalk = false, walkRadius = 6, walkMax = 9, antiAfk = true,
     spread = 0.3, placeMode = "Time",
     fpsLimit = 30, autoExec = false,
+    autoMine = false, autoDig = false, mineDelay = 0,
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
     whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whSummon = false,
     summary = false, summaryMinutes = 60,
@@ -1782,6 +1784,8 @@ end
 -- =====================================================================
 -- LOBBY: Auto Join, Auto Friends Only, Auto Summon, Auto Claim
 -- =====================================================================
+local inMine -- diisi di bagian MINE
+local mineBusy = function() return false end -- true saat di Mine / Auto Mine sedang mengejar Mine
 local MAP_PAD = { ["Castle Town"] = 1, ["Sunny Meadow"] = 4, ["Pirate Cove"] = 7, ["Snowy Summit"] = 10, ["Volcano Fortress"] = 13 }
 local MAP_LIST = { "Castle Town", "Sunny Meadow", "Pirate Cove", "Snowy Summit", "Volcano Fortress" }
 local LobbyStatus = { summon = "Status: mati", lastSummon = nil }
@@ -1847,7 +1851,7 @@ task.spawn(function()
     local since, lastDist = nil, nil
     while alive do
         task.wait(1)
-        if Cfg.autoJoin and isLobby() then
+        if Cfg.autoJoin and isLobby() and not mineBusy() then
             pcall(function()
                 local name = "PlayPad" .. tostring((MAP_PAD[Cfg.map] or 1) + (math.clamp(tonumber(Cfg.pad) or 1, 1, 3) - 1))
                 local pad = padByName(name)
@@ -1875,7 +1879,7 @@ task.spawn(function()
     local lastFire, tries, lastPad, padSince = 0, 0, nil, 0
     while alive do
         task.wait(0.15)
-        if Cfg.autoFriends and isLobby() then
+        if Cfg.autoFriends and isLobby() and not mineBusy() then
             pcall(function()
                 local pad = standingPad()
                 if not pad then tries, lastPad = 0, nil return end
@@ -2045,13 +2049,330 @@ task.spawn(function()
 end)
 
 -- =====================================================================
+-- MINE (minigame)
+-- Blok = MineDig(id), id = (lapisan - 1) x 100 + baris x 10 + kolom (lapisan 10 x 10).
+-- Server membalas MineMsg("dug", id, ok, { {idItem, jenis}, ... }, _, ringkasan, _); ok = false = belum pecah.
+-- Auto Mine terjadwal: saat Mine buka -> keluar dari match ke lobby -> MineJoin -> gali.
+-- Mine selesai -> server memindahkan ke lobby -> Auto Join map / Play Macro jalan lagi seperti biasa.
+-- =====================================================================
+local Mine = {
+    dug = {}, items = {}, failed = {}, hits = {}, closeNeeded = {}, pending = nil, rejected = nil, finds = nil,
+    status = "Mati", lastItems = {}, news = nil, raw = {}, fails = 0, schedule = "-",
+}
+local mineFlag, mineCheck = false, 0
+-- di dalam Mine: panel "Your Finds" / "Blocks dug" tampil di layar, atau lubang MyMinePit ada
+function inMine()
+    if os.clock() - mineCheck < 3 then return mineFlag end
+    mineCheck = os.clock()
+    mineFlag = workspace:FindFirstChild("MyMinePit") ~= nil
+    if not mineFlag then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        for _, d in ipairs(pg and pg:GetDescendants() or {}) do
+            if d:IsA("TextLabel") and guiShown(d) then
+                local t = plainText(d.Text)
+                if t == "Your Finds" or t:find("^Blocks dug") then mineFlag = true break end
+            end
+        end
+    end
+    return mineFlag
+end
+local function mineNeighbors(id)
+    local d, r, c = math.floor(id / 100), math.floor(id % 100 / 10), id % 10
+    local out = {}
+    if c > 0 then out[#out + 1] = id - 1 end
+    if c < 9 then out[#out + 1] = id + 1 end
+    if r > 0 then out[#out + 1] = id - 10 end
+    if r < 9 then out[#out + 1] = id + 10 end
+    if d > 0 then out[#out + 1] = id - 100 end
+    out[#out + 1] = id + 100
+    return out
+end
+local function mineBlocks()
+    local pit = workspace:FindFirstChild("MyMinePit")
+    return pit and pit:FindFirstChild("Blocks")
+end
+-- blok asli: yang hilang = sudah digali, yang berisi model (Chest / Egg / ...) = item terlihat
+local function mineSync()
+    local f = mineBlocks()
+    if not f then return false end
+    local present, maxId = {}, -1
+    for _, b in ipairs(f:GetChildren()) do
+        local id = tonumber(b:GetAttribute("Idx")) or tonumber(tostring(b.Name):match("^B(%d+)$"))
+        if id then
+            present[id] = true
+            if id > maxId then maxId = id end
+            for _, c in ipairs(b:GetChildren()) do
+                if c:IsA("Model") or c:IsA("Folder") then Mine.items[id] = c.Name break end
+            end
+        end
+    end
+    if maxId < 0 then return false end
+    for id = 0, math.floor(maxId / 100) * 100 + 99 do
+        if present[id] then
+            Mine.dug[id] = nil
+        else
+            Mine.dug[id] = true
+            Mine.items[id] = nil
+        end
+    end
+    return true
+end
+local function mineState()
+    local ms = ReplicatedStorage:FindFirstChild("MineState")
+    if not ms then return nil end
+    local ok, a = pcall(ms.GetAttributes, ms)
+    return ok and a or nil
+end
+-- modul game Shared.Mine: jadwal buka (opening) dan waktu gali (digSeconds)
+local MineMod = nil
+task.spawn(function()
+    pcall(function() MineMod = require(ReplicatedStorage:WaitForChild("Shared", 15):WaitForChild("Mine", 15)) end)
+end)
+-- jadwal: mulai, selesai, sedang buka?
+local function mineSchedule()
+    local now = os.time()
+    if MineMod and MineMod.opening then
+        local ok, st, en, open = pcall(MineMod.opening, now)
+        if ok and tonumber(st) and tonumber(en) then return tonumber(st), tonumber(en), open == true end
+    end
+    local ms = mineState()
+    if ms and tonumber(ms.EndsAt) then
+        return tonumber(ms.Start) or now, tonumber(ms.EndsAt), ms.Phase == "Open" and tonumber(ms.EndsAt) > now
+    end
+    return nil
+end
+local digTimeCache, digTimeAt = nil, 0
+local function mineDigTime()
+    if digTimeCache and os.clock() - digTimeAt < 10 then return digTimeCache end
+    local bonus = 0
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    for _, d in ipairs(pg and pg:GetDescendants() or {}) do
+        if d:IsA("TextLabel") then
+            local pct = plainText(d.Text):match("[Dd]ig speed%s*%+?(%-?%d+)%%")
+            if pct then bonus = tonumber(pct) / 100 break end
+        end
+    end
+    local t = nil
+    if MineMod and MineMod.digSeconds then
+        local ok, v = pcall(MineMod.digSeconds, bonus)
+        if ok and tonumber(v) then t = tonumber(v) end
+    end
+    digTimeCache, digTimeAt = t or 1.2, os.clock()
+    return digTimeCache
+end
+-- remote masuk MineMsg
+do
+    local function onMsg(kind, ...)
+        if not alive then return end
+        local a = table.pack(...)
+        Mine.raw[#Mine.raw + 1] = tostring(kind) .. " " .. tostring(a[1]) .. " " .. tostring(a[2])
+        if #Mine.raw > 5 then table.remove(Mine.raw, 1) end
+        if kind == "dug" then
+            local id, ok, items, summary = tonumber(a[1]), a[2], a[3], a[5]
+            if id and ok then
+                Mine.dug[id] = true
+                Mine.items[id] = nil
+                Mine.hits[id] = nil
+            elseif id then
+                -- belum pecah (chest / egg / blok keras butuh beberapa pukulan): pukul lagi blok yang sama
+                Mine.hits[id] = (Mine.hits[id] or 0) + 1
+                if Mine.pending == id then Mine.rejected = id end
+                if Mine.hits[id] > 40 then Mine.failed[id] = os.clock() end
+            end
+            for _, it in ipairs(type(items) == "table" and items or {}) do
+                if type(it) == "table" and tonumber(it[1]) and not Mine.dug[tonumber(it[1])] then
+                    Mine.items[tonumber(it[1])] = tostring(it[2])
+                    Mine.lastItems[#Mine.lastItems + 1] = tostring(it[2])
+                    if #Mine.lastItems > 6 then table.remove(Mine.lastItems, 1) end
+                end
+            end
+            if type(summary) == "table" then Mine.finds = summary end
+            if id and Mine.pending == id then Mine.pending = nil end
+        elseif kind == "news" then
+            Mine.news = plainText(a[1])
+        end
+    end
+    local function hook(r)
+        if r.Name == "MineMsg" and r:IsA("RemoteEvent") then r.OnClientEvent:Connect(onMsg) return true end
+        return false
+    end
+    local found = false
+    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do if hook(d) then found = true end end
+    if not found then
+        local c
+        c = ReplicatedStorage.DescendantAdded:Connect(function(d) if hook(d) and c then c:Disconnect() end end)
+    end
+end
+-- urutan zig-zag: baris berganti arah, lapisan berikutnya mulai tepat di bawah blok terakhir
+local function zigKey(id)
+    local L, r, c = math.floor(id / 100), math.floor(id % 100 / 10), id % 10
+    local er = (L % 2 == 0) and r or (9 - r)
+    local ec = (er % 2 == 0) and c or (9 - c)
+    return L * 100 + er * 10 + ec
+end
+-- item terlihat (terdekat) dulu, lalu blok berikutnya dalam urutan zig-zag
+local function minePick()
+    local f = mineBlocks()
+    if not f then return nil end
+    local list = {}
+    for _, b in ipairs(f:GetChildren()) do
+        local id = tonumber(b:GetAttribute("Idx")) or tonumber(tostring(b.Name):match("^B(%d+)$"))
+        if id and not Mine.dug[id] and (not Mine.failed[id] or os.clock() - Mine.failed[id] > 120) then list[#list + 1] = id end
+    end
+    local _, _, hrp = charParts()
+    local bestItem, bestD = nil, nil
+    for _, id in ipairs(list) do
+        if Mine.items[id] then
+            local part = f:FindFirstChild("B" .. id)
+            local d = (hrp and part and part:IsA("BasePart")) and (hrp.Position - part.Position).Magnitude or 0
+            if not bestD or d < bestD then bestItem, bestD = id, d end
+        end
+    end
+    if bestItem then return bestItem, "ambil " .. Mine.items[bestItem] end
+    table.sort(list, function(a, b) return zigKey(a) < zigKey(b) end)
+    if not list[1] then return nil end
+    return list[1], "urut"
+end
+-- karakter berjalan ke ruang kosong di sebelah blok (utamakan di atasnya) sampai dalam jangkauan gali
+local function mineWalkTo(id)
+    local f = mineBlocks()
+    local part = f and f:FindFirstChild("B" .. id)
+    local _, hum, hrp = charParts()
+    if not (part and hum and hrp and part:IsA("BasePart")) then return false end
+    local reach = Mine.closeNeeded[id] and 5.5 or 8
+    local off = nil
+    for _, n in ipairs(mineNeighbors(id)) do
+        if Mine.dug[n] then
+            local diff = n - id
+            local o = (diff == 1 and Vector3.new(0, 0, 5)) or (diff == -1 and Vector3.new(0, 0, -5))
+                or (diff == 10 and Vector3.new(5, 0, 0)) or (diff == -10 and Vector3.new(-5, 0, 0))
+                or (diff == -100 and Vector3.new(0, 5, 0)) or nil
+            if o and (not off or o.Y > off.Y) then off = o end
+        end
+    end
+    local goal = part.Position + (off or Vector3.new(0, 5, 0))
+    local t0, bestD, lastGain = os.clock(), math.huge, os.clock()
+    while alive and Cfg.autoDig do
+        local d = (hrp.Position - part.Position).Magnitude
+        if d <= reach then hum:MoveTo(hrp.Position) return true end
+        if d < bestD - 0.5 then bestD, lastGain = d, os.clock()
+        elseif os.clock() - lastGain > 1.2 then hum.Jump = true lastGain = os.clock() end
+        hum:MoveTo(goal)
+        if os.clock() - t0 > 20 then return false end
+        task.wait(0.15)
+    end
+    return false
+end
+local function fmtWait(sec)
+    sec = math.max(math.floor(sec), 0)
+    local h, m = math.floor(sec / 3600), math.floor(sec % 3600 / 60)
+    return h > 0 and string.format("%dj %dm", h, m) or string.format("%dm %ds", m, sec % 60)
+end
+
+-- Auto Mine terjadwal: tunggu Mine buka -> keluar dari match -> MineJoin di lobby -> Auto Dig di dalam Mine
+local MINE_MIN_LEFT = 5 * 60 -- kalau Mine tutup kurang dari 5 menit lagi, tidak dikejar
+local function mineWanted()
+    if not Cfg.autoMine then return false end
+    local _, en, open = mineSchedule()
+    return open == true and en ~= nil and en - os.time() > MINE_MIN_LEFT
+end
+Mine.wanted = mineWanted
+mineBusy = function() return inMine() or mineWanted() end
+task.spawn(function()
+    local lastLeave, lastJoin = 0, 0
+    while alive do
+        task.wait(1)
+        pcall(function()
+            local st, en, open = mineSchedule()
+            if st then
+                Mine.schedule = open and ("Buka · tutup dalam " .. fmtWait(en - os.time()))
+                    or ("Tutup · buka " .. os.date("%H:%M", st) .. " (dalam " .. fmtWait(st - os.time()) .. ")")
+            else
+                Mine.schedule = "Jadwal belum terbaca"
+            end
+            if not Cfg.autoMine then return end
+            if inMine() then
+                Cfg.autoDig = true -- di dalam Mine: langsung gali
+                return
+            end
+            if not mineWanted() then
+                if Cfg.autoMine then Mine.status = "Menunggu Mine buka · " .. Mine.schedule end
+                return
+            end
+            if inMatch() and os.clock() - lastLeave > 15 then
+                -- keluar dari match ke lobby (tombol Lobby; kalau tidak diterima, teleport ke lobby)
+                lastLeave = os.clock()
+                Mine.status = "Mine buka: keluar ke lobby"
+                if Mine.queueExec then pcall(Mine.queueExec) end
+                callRemote("ReturnToLobby")
+                task.delay(8, function()
+                    if alive and inMatch() and mineWanted() then
+                        pcall(function() game:GetService("TeleportService"):Teleport(LOBBY_PLACE, LocalPlayer) end)
+                    end
+                end)
+            elseif isLobby() and os.clock() - lastJoin > 15 then
+                lastJoin = os.clock()
+                if Mine.queueExec then pcall(Mine.queueExec) end
+                local ok, res, msg = callRemote("MineJoin")
+                Mine.status = "Masuk Mine: " .. tostring(ok and (msg or res) or res)
+            end
+        end)
+    end
+end)
+-- Auto Dig
+task.spawn(function()
+    while alive do
+        task.wait(0.1)
+        if Cfg.autoDig and inMine() then
+            pcall(function()
+                if not mineSync() then Mine.status = "Blok Mine belum ada" task.wait(1) return end
+                local id, why = minePick()
+                if not id then Mine.status = "Tidak ada blok yang bisa digali" task.wait(1) return end
+                Mine.status = string.format("Jalan ke blok %d", id)
+                if not mineWalkTo(id) then
+                    Mine.failed[id] = os.clock()
+                    Mine.status = string.format("Blok %d tidak terjangkau, dilewati 2 menit", id)
+                    return
+                end
+                -- seperti menahan klik: tunggu waktu gali penuh (+ jeda tambahan) sebelum blok dikirim
+                task.wait(mineDigTime() + 0.15 + (tonumber(Cfg.mineDelay) or 0))
+                if not Cfg.autoDig then return end
+                Mine.pending, Mine.rejected = id, nil
+                callRemote("MineDig", id)
+                local t0 = os.clock()
+                while alive and Mine.pending == id and os.clock() - t0 < 3 do task.wait(0.1) end
+                if Mine.pending == id then
+                    Mine.pending = nil
+                    if not Mine.closeNeeded[id] then
+                        Mine.closeNeeded[id] = true -- mungkin kurang dekat: coba sekali lagi dari jarak dekat
+                        Mine.status = string.format("Blok %d tidak dibalas, coba lebih dekat", id)
+                        return
+                    end
+                    Mine.failed[id] = os.clock()
+                    Mine.fails = Mine.fails + 1
+                    Mine.status = string.format("Blok %d tidak dibalas (%dx)", id, Mine.fails)
+                    if Mine.fails >= 5 then task.wait(5) Mine.fails = 0 end
+                elseif Mine.rejected == id then
+                    Mine.status = string.format("Pukul %d (%s) · %dx", id, why, Mine.hits[id] or 0)
+                else
+                    Mine.fails = 0
+                    Mine.status = string.format("Gali %d (%s) · lapisan %d · %.2f dtk", id, why, math.floor(id / 100) + 1, mineDigTime())
+                end
+            end)
+        elseif Cfg.autoDig and not inMine() and not Cfg.autoMine then
+            Mine.status = "Auto Dig: tidak di Mine"
+        end
+    end
+end)
+
+-- =====================================================================
 -- MATCH: Auto Start, Auto Skip, Auto Play Again / Return, Auto Target, Auto Walk, Anti AFK
 -- =====================================================================
 task.spawn(function()
     local lastFire, firedFor = 0, nil
     while alive do
         task.wait(0.5)
-        if Cfg.autoStart and inMatch() then
+        if Cfg.autoStart and inMatch() and not mineBusy() then
             pcall(function()
                 local now_ = os.clock()
                 if matchRunning() then return end
@@ -2079,7 +2400,9 @@ MatchEndedEv.Event:Connect(function()
     local endedAt = Match.endedAt
     task.delay(4, function()
         if not alive or Match.endedAt ~= endedAt or Match.lastCamera > endedAt then return end
-        if Cfg.autoReturn and Match.count >= math.max(tonumber(Cfg.returnEvery) or 1, 1) then
+        if mineBusy() then
+            callRemote("ReturnToLobby") -- Mine sedang buka: Auto Mine yang mengambil alih
+        elseif Cfg.autoReturn and Match.count >= math.max(tonumber(Cfg.returnEvery) or 1, 1) then
             callRemote("ReturnToLobby")
         elseif Cfg.autoAgain then
             callRemote("PlayAgain")
@@ -2729,6 +3052,7 @@ do
     LocalPlayer.OnTeleport:Connect(function(st)
         if alive and st == Enum.TeleportState.Started then Perf.queueExec() end
     end)
+    Mine.queueExec = Perf.queueExec
 end
 
 -- =====================================================================
@@ -3151,6 +3475,55 @@ do
     sPlace:AddLabel("Time: sesuai detik rekaman. Wave: sesuai wave saat direkam. Money: langsung begitu cash cukup, urutan tetap.")
     Flag("spread", sPlace:AddSlider("Placement Spread", 0, 2, 0.3, " studs", function(v) Cfg.spread = v end, 0.1))
     sPlace:AddLabel("Naga yang tidak dimiliki atau kena batas \"Max\" otomatis dilewati.")
+end
+
+-- ---------------- Mine ----------------
+do
+    local tMine = AddTab("Mine")
+    local sMine = tMine:AddSection("Auto Mine", "left")
+    Flag("autoMine", sMine:AddToggle("Auto Mine (terjadwal)", false, function(v) Cfg.autoMine = v end), "toggle")
+    sMine:AddLabel("Menunggu Mine buka. Saat buka: keluar dari match ke lobby, masuk Mine, lalu gali otomatis. Setelah Mine selesai, Auto Join map / Play Macro jalan lagi. Nyalakan Auto Execute (tab Performance) supaya script ikut jalan setelah pindah server.")
+    local sched = sMine:AddLabel("Jadwal: -")
+    Flag("autoDig", sMine:AddToggle("Auto Dig (saat sudah di Mine)", false, function(v) Cfg.autoDig = v end), "toggle")
+    sMine:AddLabel("Urutan zig-zag lapis per lapis; item yang terlihat (chest, egg, dll.) dipukul duluan sampai pecah. Karakter berjalan ke setiap blok.")
+    Flag("mineDelay", sMine:AddSlider("Jeda Tambahan", 0, 2, 0, " detik", function(v) Cfg.mineDelay = v end, 0.1))
+    local st = sMine:AddLabel("Status: mati")
+    local sPool = tMine:AddSection("Sisa Harta (semua server)", "right")
+    local pool = sPool:AddLabel("-")
+    local sFind = tMine:AddSection("Your Finds", "right")
+    local finds = sFind:AddLabel("-")
+    local items = sFind:AddLabel("-")
+    local news = sFind:AddLabel("-")
+    local raw = sFind:AddLabel("-")
+    task.spawn(function()
+        while alive do
+            pcall(function()
+                st.Text = "Status: " .. tostring(Mine.status)
+                sched.Text = "Jadwal Mine: " .. tostring(Mine.schedule)
+                local ms = mineState()
+                if ms then
+                    local left = (tonumber(ms.EndsAt) or 0) - os.time()
+                    pool.Text = string.format("%s%s\nSECRET %s/%s · Pass %s/%s · Gems %s/%s\nPotions %s/%s · Shards %s/%s · Coins %s",
+                        ms.Phase == "Open" and "Buka" or ("Tutup (" .. tostring(ms.Phase) .. ")"),
+                        (ms.Phase == "Open" and left > 0) and (" · tutup dalam " .. mmss(left)) or "",
+                        comma(ms.Left_secret), comma(ms.Total_secret), comma(ms.Left_pass), comma(ms.Total_pass),
+                        comma(ms.Left_gems), comma(ms.Total_gems), comma(ms.Left_potions), comma(ms.Total_potions),
+                        comma(ms.Left_shards), comma(ms.Total_shards), comma(ms.Left_coins))
+                else
+                    pool.Text = "Data Mine belum terbaca"
+                end
+                local f = Mine.finds or {}
+                finds.Text = string.format("Blok: %s · Gems: %s · Coins: %s\nPotion: %s · Shards: %s · Pets: %s",
+                    comma(f.blocks), comma(f.gems), comma(f.coins), comma(f.potions), comma(f.shards), comma(f.pets))
+                local open = 0
+                for _ in pairs(Mine.items) do open = open + 1 end
+                items.Text = string.format("Item terlihat: %d · Terakhir: %s", open, #Mine.lastItems > 0 and table.concat(Mine.lastItems, ", ") or "-")
+                news.Text = "Kabar: " .. tostring(Mine.news or "-")
+                raw.Text = "[diag] " .. (#Mine.raw > 0 and table.concat(Mine.raw, " | ") or "-")
+            end)
+            task.wait(1)
+        end
+    end)
 end
 
 -- ---------------- Performance ----------------
