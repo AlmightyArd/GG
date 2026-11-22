@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.8.0"
+local VERSION = "v1.9.0"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -1428,7 +1428,7 @@ local Cfg = {
     autoWalk = false, walkRadius = 6, walkMax = 9, antiAfk = true,
     spread = 0.3, placeMode = "Time",
     fpsLimit = 30, autoExec = false,
-    autoMine = false, autoDig = false, mineDelay = 0, minePattern = "Lorong",
+    autoMine = false, autoDig = false, mineDelay = 0, minePattern = "Lorong Cepat",
     discordUserId = "", tagEvery = false, tagDefeat = true, whMatchEnd = false,
     whAvatar = true, whWave = true, whBP = true, whDaily = true, whCoins = true, whSummon = false,
     summary = false, summaryMinutes = 60,
@@ -2123,7 +2123,7 @@ local function mineSync()
             present[id] = true
             if id > maxId then maxId = id end
             for _, c in ipairs(b:GetChildren()) do
-                if c:IsA("Model") or c:IsA("Folder") then Mine.items[id] = c.Name break end
+                if c:IsA("Model") or c:IsA("Folder") or c:IsA("BasePart") or c:IsA("Tool") then Mine.items[id] = c.Name break end
             end
         end
     end
@@ -2273,6 +2273,8 @@ local function mineDataSummary()
 end
 Mine.dataSummary = mineDataSummary
 
+local LORONG = {} -- [sel 0..99] = urutan di jalur lorong (diisi di bawah)
+Mine.entryIdx, Mine.chestDone, Mine.lastPath, Mine.curLayer = {}, {}, nil, nil
 -- remote masuk MineMsg
 do
     local function onMsg(kind, ...)
@@ -2283,6 +2285,9 @@ do
         if kind == "dug" then
             local id, ok, items, summary = tonumber(a[1]), a[2], a[3], a[5]
             if id and ok then
+                local L = math.floor(id / 100)
+                -- Lorong Cepat: chest di lapisan ini sudah diambil -> lapisan dianggap selesai
+                if Mine.items[id] and tostring(Mine.items[id]):lower():find("chest", 1, true) then Mine.chestDone[L] = true end
                 Mine.dug[id] = true
                 Mine.items[id] = nil
                 Mine.hits[id] = nil
@@ -2330,7 +2335,6 @@ local function zigKey(id)
 end
 -- Pola Lorong: di setiap lapisan hanya digali jalur ular baris 0, 3, 6, 9 + penghubung di ujungnya
 -- (46 blok per lapisan, sisanya tetap terlihat dari samping). Lapisan berikutnya mulai tepat di bawah ujung terakhir.
-local LORONG = {}
 do
     local path = {}
     local function row(r, rev) for i = 0, 9 do path[#path + 1] = r * 10 + (rev and (9 - i) or i) end end
@@ -2368,7 +2372,48 @@ local function minePick()
         end
     end
     if bestItem then return bestItem, "ambil " .. Mine.items[bestItem] end
-    if Cfg.minePattern == "Lorong" then
+    if Cfg.minePattern == "Lorong Cepat" then
+        -- jalur lorong yang sama, tapi tiap lapisan berhenti begitu chest-nya sudah diambil (paling banyak 1 chest
+        -- per lapisan), lalu turun tepat di bawah posisi terakhir. Lapisan 1 (belum pernah ada chest) langsung ditembus.
+        local present = {}
+        for _, id in ipairs(list) do present[id] = true end
+        -- lapisan yang sedang dikerjakan (dicatat oleh loop gali); kalau script baru jalan, tebak dari blok yang sudah digali
+        local L = Mine.curLayer
+        if L == nil then
+            L = -1
+            for id in pairs(Mine.dug) do
+                if LORONG[id % 100] and math.floor(id / 100) > L then L = math.floor(id / 100) end
+            end
+        end
+        if L < 0 then
+            if present[0] then return 0, "mulai" end
+        else
+            if L > 0 and not Mine.chestDone[L] then
+                local e = Mine.entryIdx[L] or 1
+                local best, bestR = nil, nil
+                for _, id in ipairs(list) do
+                    local i = (math.floor(id / 100) == L) and LORONG[id % 100] or nil
+                    if i then
+                        local r = (i >= e) and (i - e) or (100 + e - i) -- maju dari titik masuk, lalu sisi sebaliknya
+                        if not bestR or r < bestR then best, bestR = id, r end
+                    end
+                end
+                if best then return best, "lorong cepat" end
+            end
+            local from = (Mine.lastPath and math.floor(Mine.lastPath / 100) == L) and Mine.lastPath or nil
+            if not from then
+                for id in pairs(Mine.dug) do
+                    if LORONG[id % 100] and math.floor(id / 100) == L then from = id break end
+                end
+            end
+            if from then
+                local t = from + 100
+                while Mine.dug[t] do t = t + 100 end
+                if present[t] then return t, Mine.chestDone[L] and "turun (chest sudah)" or "turun" end
+            end
+        end
+    end
+    if Cfg.minePattern == "Lorong" or Cfg.minePattern == "Lorong Cepat" then
         local best, bestK = nil, nil
         for _, id in ipairs(list) do
             local k = lorongKey(id)
@@ -2516,6 +2561,11 @@ task.spawn(function()
                     end
                 else
                     Mine.fails = 0
+                    if why == "mulai" or why == "lorong cepat" or tostring(why):find("^turun") then
+                        local L = math.floor(id / 100)
+                        Mine.lastPath, Mine.curLayer = id, L
+                        if not Mine.entryIdx[L] then Mine.entryIdx[L] = LORONG[id % 100] end
+                    end
                     Mine.status = string.format("Gali %d (%s) · lapisan %d · %.2f dtk", id, why, math.floor(id / 100) + 1, mineDigTime())
                 end
             end)
@@ -3648,7 +3698,8 @@ do
     sMine:AddLabel("Menunggu Mine buka. Saat buka: keluar dari match ke lobby, masuk Mine, lalu gali otomatis. Setelah Mine selesai, Auto Join map / Play Macro jalan lagi. Nyalakan Auto Execute (tab Performance) supaya script ikut jalan setelah pindah server.")
     local sched = sMine:AddLabel("Jadwal: -")
     Flag("autoDig", sMine:AddToggle("Auto Dig (saat sudah di Mine)", false, function(v) Cfg.autoDig = v end), "toggle")
-    Flag("minePattern", sMine:AddDropdown("Pola Gali", { "Lorong", "Zig-zag" }, "Lorong", function(v) Cfg.minePattern = v end))
+    Flag("minePattern", sMine:AddDropdown("Pola Gali", { "Lorong Cepat", "Lorong", "Zig-zag" }, "Lorong Cepat", function(v) Cfg.minePattern = v end))
+    sMine:AddLabel("Lorong Cepat: sama dengan Lorong, tapi begitu chest di satu lapisan sudah diambil (data: paling banyak 1 chest per lapisan), sisa lapisan dilewati dan langsung turun. Lapisan 1 langsung ditembus.")
     sMine:AddLabel("Lorong: hanya jalur baris 0, 3, 6, 9 yang digali (46 blok/lapisan), blok lain tetap terlihat isinya dari samping, jadi lebih cepat turun dan lebih banyak blok terlihat. Zig-zag: semua blok digali. Item yang terlihat selalu dipukul duluan.")
     Flag("mineDelay", sMine:AddSlider("Jeda Tambahan", 0, 2, 0, " detik", function(v) Cfg.mineDelay = v end, 0.1))
     local st = sMine:AddLabel("Status: mati")
