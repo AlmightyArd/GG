@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.9.2"
+local VERSION = "v1.9.3"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -2465,9 +2465,14 @@ local function minePick()
         -- lapisan yang sedang dikerjakan (dicatat oleh loop gali); kalau script baru jalan, tebak dari blok yang sudah digali
         local L = Mine.curLayer
         if L == nil then
-            L = -1
-            for id in pairs(Mine.dug) do
-                if LORONG[id % 100] and math.floor(id / 100) > L then L = math.floor(id / 100) end
+            -- belum ada catatan (script baru jalan / baru pindah pola): pakai lapisan tempat karakter berdiri
+            if reach and reach.start and reach.start >= 0 then
+                L = math.floor(reach.start / 100)
+            else
+                L = -1
+                for id in pairs(Mine.dug) do
+                    if LORONG[id % 100] and math.floor(id / 100) > L then L = math.floor(id / 100) end
+                end
             end
         end
         if L < 0 then
@@ -2516,6 +2521,16 @@ local function minePick()
         end
         if best then
             Mine.curLayer = math.max(Mine.curLayer or 0, math.floor(best / 100))
+            return best, "cari jalan"
+        end
+        -- tidak ada di lapisan ini / bawahnya: blok terjangkau terdekat di mana saja (jangan sampai diam)
+        for _, id in ipairs(list) do
+            local part = f:FindFirstChild("B" .. id)
+            local d = (hrp and part and part:IsA("BasePart")) and (hrp.Position - part.Position).Magnitude or id
+            if not bestD or d < bestD then best, bestD = id, d end
+        end
+        if best then
+            Mine.curLayer = math.floor(best / 100)
             return best, "cari jalan"
         end
         return nil
@@ -3819,7 +3834,10 @@ do
     sMine:AddLabel("Menunggu Mine buka. Saat buka: keluar dari match ke lobby, masuk Mine, lalu gali otomatis. Setelah Mine selesai, Auto Join map / Play Macro jalan lagi. Nyalakan Auto Execute (tab Performance) supaya script ikut jalan setelah pindah server.")
     local sched = sMine:AddLabel("Jadwal: -")
     Flag("autoDig", sMine:AddToggle("Auto Dig (saat sudah di Mine)", false, function(v) Cfg.autoDig = v end), "toggle")
-    Flag("minePattern", sMine:AddDropdown("Pola Gali", { "Lorong Cepat", "Lorong", "Zig-zag" }, "Lorong Cepat", function(v) Cfg.minePattern = v end))
+    Flag("minePattern", sMine:AddDropdown("Pola Gali", { "Lorong Cepat", "Lorong", "Zig-zag" }, "Lorong Cepat", function(v)
+        Cfg.minePattern = v
+        Mine.curLayer, Mine.lastPath = nil, nil -- mulai lagi dari lapisan tempat karakter berdiri
+    end))
     sMine:AddLabel("Lorong Cepat: sama dengan Lorong, tapi begitu chest di satu lapisan sudah diambil (data: paling banyak 1 chest per lapisan), sisa lapisan dilewati dan langsung turun. Lapisan 1 langsung ditembus.")
     sMine:AddLabel("Lorong: hanya jalur baris 0, 3, 6, 9 yang digali (46 blok/lapisan), blok lain tetap terlihat isinya dari samping, jadi lebih cepat turun dan lebih banyak blok terlihat. Zig-zag: semua blok digali. Item yang terlihat selalu dipukul duluan.")
     Flag("mineDelay", sMine:AddSlider("Jeda Tambahan", 0, 2, 0, " detik", function(v) Cfg.mineDelay = v end, 0.1))
