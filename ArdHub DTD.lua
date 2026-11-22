@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.9.0"
+local VERSION = "v1.9.2"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -2354,13 +2354,98 @@ local function lorongKey(id)
     return L * 100 + i
 end
 -- item terlihat (terdekat) dulu, lalu blok berikutnya sesuai pola (Lorong / Zig-zag)
+-- ---------- peta lubang: posisi tiap sel dan jalan yang bisa dilewati karakter ----------
+-- Sel 5 x 5 x 5 stud, sumbu sejajar dunia: baris -> X, kolom -> Z, lapisan -> Y turun.
+local function mineRef()
+    local f = mineBlocks()
+    if not f then return nil end
+    for _, b in ipairs(f:GetChildren()) do
+        local id = tonumber(b:GetAttribute("Idx")) or tonumber(tostring(b.Name):match("^B(%d+)$"))
+        if id and b:IsA("BasePart") then return id, b.Position end
+    end
+    return nil
+end
+local function splitId(id) return math.floor(id / 100), math.floor(id % 100 / 10), id % 10 end
+local function cellPos(id, refId, refPos)
+    local L, r, c = splitId(id)
+    local rL, rr, rc = splitId(refId)
+    return refPos + Vector3.new((r - rr) * 5, -(L - rL) * 5, (c - rc) * 5)
+end
+-- sel tempat karakter berdiri (-1 = di permukaan, di atas lapisan 1)
+local function charCell(refId, refPos, hrp)
+    local rL, rr, rc = splitId(refId)
+    local d = hrp.Position - refPos
+    local r = math.floor(d.X / 5 + rr + 0.5)
+    local c = math.floor(d.Z / 5 + rc + 0.5)
+    local L = math.floor(-(d.Y - 1) / 5 + rL + 0.5)
+    if r < 0 or r > 9 or c < 0 or c > 9 or L < 0 then return -1 end
+    local id = L * 100 + r * 10 + c
+    if Mine.dug[id] then return id end
+    -- pembulatan meleset: sel kosong di sekitarnya
+    for _, n in ipairs(mineNeighbors(id)) do if Mine.dug[n] then return n end end
+    return -1
+end
+-- BFS lewat sel yang sudah digali (bisa naik/turun 1 sel dengan lompat). -1 = permukaan.
+local function mineReach(start)
+    local prev, seen = {}, { [start] = true }
+    local q, head = { start }, 1
+    while head <= #q do
+        local cur = q[head]
+        head = head + 1
+        local nb
+        if cur == -1 then
+            nb = {}
+            for i = 0, 99 do if Mine.dug[i] then nb[#nb + 1] = i end end
+        else
+            nb = mineNeighbors(cur)
+            if cur < 100 then nb[#nb + 1] = -1 end
+        end
+        for _, n in ipairs(nb) do
+            if not seen[n] and (n == -1 or Mine.dug[n]) then
+                seen[n] = true
+                prev[n] = cur
+                q[#q + 1] = n
+            end
+        end
+    end
+    return seen, prev
+end
+-- sel tempat berdiri untuk menggali blok id (sel kosong terjangkau di sebelahnya; utamakan di atasnya)
+local function standCell(id, seen)
+    if id < 100 and seen[-1] then return -1 end
+    local best, rank = nil, nil
+    for _, n in ipairs(mineNeighbors(id)) do
+        if seen[n] then
+            local diff = n - id
+            local rk = (diff == -100) and 0 or (diff == 100) and 2 or 1
+            if not rank or rk < rank then best, rank = n, rk end
+        end
+    end
+    return best
+end
+local mineReachCache = { at = 0 }
+local function mineReachNow()
+    if os.clock() - mineReachCache.at < 0.5 and mineReachCache.seen then return mineReachCache end
+    local refId, refPos = mineRef()
+    local _, _, hrp = charParts()
+    if not (refId and hrp) then return nil end
+    local start = charCell(refId, refPos, hrp)
+    local seen, prev = mineReach(start)
+    mineReachCache = { at = os.clock(), seen = seen, prev = prev, start = start, refId = refId, refPos = refPos }
+    return mineReachCache
+end
+
 local function minePick()
     local f = mineBlocks()
     if not f then return nil end
+    local reach = mineReachNow()
     local list = {}
     for _, b in ipairs(f:GetChildren()) do
         local id = tonumber(b:GetAttribute("Idx")) or tonumber(tostring(b.Name):match("^B(%d+)$"))
-        if id and not Mine.dug[id] and (not Mine.failed[id] or os.clock() - Mine.failed[id] > 120) then list[#list + 1] = id end
+        if id and not Mine.dug[id] and (not Mine.failed[id] or os.clock() - Mine.failed[id] > 120)
+            and (not reach or standCell(id, reach.seen) ~= nil) then -- hanya blok yang bisa didatangi tanpa menembus dinding
+            list[#list + 1] = id
+        end
     end
     local _, _, hrp = charParts()
     local bestItem, bestD = nil, nil
@@ -2412,6 +2497,28 @@ local function minePick()
                 if present[t] then return t, Mine.chestDone[L] and "turun (chest sudah)" or "turun" end
             end
         end
+        -- cadangan: blok terbuka terdekat dengan karakter di lapisan ini atau di bawahnya
+        -- (jangan kembali ke sisa lapisan atas yang sengaja dilewati)
+        local base = math.max(L, 0)
+        local best, bestD = nil, nil
+        for _, id in ipairs(list) do
+            if math.floor(id / 100) >= base then
+                local open = id < 100
+                if not open then
+                    for _, n in ipairs(mineNeighbors(id)) do if Mine.dug[n] then open = true break end end
+                end
+                if open then
+                    local part = f:FindFirstChild("B" .. id)
+                    local d = (hrp and part and part:IsA("BasePart")) and (hrp.Position - part.Position).Magnitude or (id - base * 100)
+                    if not bestD or d < bestD then best, bestD = id, d end
+                end
+            end
+        end
+        if best then
+            Mine.curLayer = math.max(Mine.curLayer or 0, math.floor(best / 100))
+            return best, "cari jalan"
+        end
+        return nil
     end
     if Cfg.minePattern == "Lorong" or Cfg.minePattern == "Lorong Cepat" then
         local best, bestK = nil, nil
@@ -2431,29 +2538,43 @@ local function mineWalkTo(id)
     local part = f and f:FindFirstChild("B" .. id)
     local _, hum, hrp = charParts()
     if not (part and hum and hrp and part:IsA("BasePart")) then return false end
-    local reach = Mine.closeNeeded[id] and 5.5 or 8
-    local off = nil
-    for _, n in ipairs(mineNeighbors(id)) do
-        if Mine.dug[n] then
-            local diff = n - id
-            local o = (diff == 1 and Vector3.new(0, 0, 5)) or (diff == -1 and Vector3.new(0, 0, -5))
-                or (diff == 10 and Vector3.new(5, 0, 0)) or (diff == -10 and Vector3.new(-5, 0, 0))
-                or (diff == -100 and Vector3.new(0, 5, 0)) or nil
-            if o and (not off or o.Y > off.Y) then off = o end
+    local reachDist = Mine.closeNeeded[id] and 5.5 or 8
+    if (hrp.Position - part.Position).Magnitude <= reachDist and not Mine.closeNeeded[id] then return true end
+    mineReachCache.at = 0
+    local R = mineReachNow()
+    if not R then return false end
+    local stand = standCell(id, R.seen)
+    if not stand then return false end
+    -- jalur sel dari posisi karakter ke sel berdiri (lewat lorong yang sudah digali, tidak menembus dinding)
+    local path, cur = {}, stand
+    while cur ~= nil and cur ~= R.start do
+        table.insert(path, 1, cur)
+        cur = R.prev[cur]
+    end
+    local function pointOf(cell)
+        if cell == -1 then return part.Position + Vector3.new(0, 5, 0) end
+        return cellPos(cell, R.refId, R.refPos)
+    end
+    local t0 = os.clock()
+    for _, cell in ipairs(path) do
+        local goal = pointOf(cell)
+        local w0, lastJump = os.clock(), 0
+        while alive and Cfg.autoDig do
+            local flat = (Vector3.new(goal.X, 0, goal.Z) - Vector3.new(hrp.Position.X, 0, hrp.Position.Z)).Magnitude
+            if flat <= 1.8 and math.abs(goal.Y - hrp.Position.Y) < 4.5 then break end
+            hum:MoveTo(Vector3.new(goal.X, hrp.Position.Y, goal.Z))
+            -- sel tujuan lebih tinggi, atau tertahan: lompat
+            if (goal.Y - hrp.Position.Y > 1.5 or os.clock() - w0 > 1.2) and os.clock() - lastJump > 0.6 then
+                hum.Jump = true
+                lastJump = os.clock()
+            end
+            if os.clock() - w0 > 5 or os.clock() - t0 > 30 then return false end
+            task.wait(0.1)
         end
+        if (hrp.Position - part.Position).Magnitude <= reachDist and not Mine.closeNeeded[id] then break end
     end
-    local goal = part.Position + (off or Vector3.new(0, 5, 0))
-    local t0, bestD, lastGain = os.clock(), math.huge, os.clock()
-    while alive and Cfg.autoDig do
-        local d = (hrp.Position - part.Position).Magnitude
-        if d <= reach then hum:MoveTo(hrp.Position) return true end
-        if d < bestD - 0.5 then bestD, lastGain = d, os.clock()
-        elseif os.clock() - lastGain > 1.2 then hum.Jump = true lastGain = os.clock() end
-        hum:MoveTo(goal)
-        if os.clock() - t0 > 20 then return false end
-        task.wait(0.15)
-    end
-    return false
+    hum:MoveTo(hrp.Position)
+    return (hrp.Position - part.Position).Magnitude <= reachDist + 1
 end
 local function fmtWait(sec)
     sec = math.max(math.floor(sec), 0)
