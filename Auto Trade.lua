@@ -1,5 +1,5 @@
 --[[
-    Ard Hub Auto Trade (script terpisah dari Ard Hub)
+    Ard Hub Auto Trade (v1.1.0) (script terpisah dari Ard Hub)
 
     1. Auto Bump        : TradeGlobal("bumpTrade", <ID iklan>) setiap BUMP_EVERY detik
     2. Auto Accept      : menerima permintaan trade (TradeSendInvite -> TradeAcceptInvite)
@@ -98,7 +98,7 @@ round(win, 8)
 outline(win)
 local top = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Active = true, Parent = win })
 new("TextLabel", {
-    Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
+    Size = UDim2.new(1, -104, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
     Text = "Auto Trade", TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 14,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = top,
 })
@@ -108,6 +108,12 @@ local closeBtn = new("TextButton", {
 })
 round(closeBtn, 5)
 outline(closeBtn)
+local minBtn = new("TextButton", {
+    Size = UDim2.new(0, 26, 0, 22), Position = UDim2.new(1, -92, 0, 4), BackgroundColor3 = C.field,
+    BorderSizePixel = 0, AutoButtonColor = false, Text = "–", TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 14, Parent = top,
+})
+round(minBtn, 5)
+outline(minBtn)
 
 local toggles = {}
 local function makeToggle(key, label, x)
@@ -150,7 +156,7 @@ end
 local tabLog, tabLogStroke = makeTab("Log", 0)
 local tabBatal, tabBatalStroke = makeTab("Batal (0)", 0.5)
 local logBox = new("TextLabel", {
-    Size = UDim2.new(1, -16, 1, -134), Position = UDim2.new(0, 8, 0, 126), BackgroundColor3 = C.field,
+    Size = UDim2.new(1, -16, 1, -164), Position = UDim2.new(0, 8, 0, 126), BackgroundColor3 = C.field,
     BorderSizePixel = 0, Text = "", TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 10, TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Bottom, ClipsDescendants = true, Parent = win,
 })
@@ -178,10 +184,27 @@ local function footBtn(text, x, primary)
 end
 local copyBatalBtn = footBtn("Salin", 0, true)
 local clearBatalBtn = footBtn("Bersihkan", 0.5, false)
+-- tombol bawah tab Log: Salin Log / Bersihkan Log
+local logFoot = new("Frame", {
+    Size = UDim2.new(1, -16, 0, 24), Position = UDim2.new(0, 8, 1, -32), BackgroundTransparency = 1, Parent = win,
+})
+local function logFootBtn(text, x, primary)
+    local b = new("TextButton", {
+        Size = UDim2.new(0.5, -3, 1, 0), Position = UDim2.new(x, x > 0 and 3 or 0, 0, 0),
+        BackgroundColor3 = primary and C.accent or C.field, BorderSizePixel = 0, AutoButtonColor = false,
+        Text = text, TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 11, Parent = logFoot,
+    })
+    round(b, 5)
+    if not primary then outline(b) end
+    return b
+end
+local copyLogBtn = logFootBtn("Salin Log", 0, true)
+local clearLogBtn = logFootBtn("Bersihkan Log", 0.5, false)
 local currentTab = "log"
 local function showTab(name)
     currentTab = name
     logBox.Visible = name == "log"
+    logFoot.Visible = name == "log"
     batalPanel.Visible = name == "batal"
     tabLog.BackgroundColor3 = name == "log" and Color3.fromRGB(42, 35, 80) or C.field
     tabBatal.BackgroundColor3 = name == "batal" and Color3.fromRGB(42, 35, 80) or C.field
@@ -205,6 +228,13 @@ local function log(text)
     if #logLines > 12 then table.remove(logLines, 1) end
     uiDirty = true
 end
+clearLogBtn.MouseButton1Click:Connect(function()
+    table.clear(logLines)
+    uiDirty = true
+end)
+copyLogBtn.MouseButton1Click:Connect(function()
+    if setclipboard then pcall(setclipboard, table.concat(logLines, "\n")) end
+end)
 local function setStatus(text)
     statusText = text
     uiDirty = true
@@ -316,6 +346,30 @@ task.spawn(function()
         task.wait(0.2)
     end
 end)
+
+do -- minimize: jendela diperkecil jadi baris judul saja; tekan lagi untuk membuka
+    local minimized, savedSize, savedVis = false, nil, {}
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        if minimized then
+            savedSize = win.Size
+            table.clear(savedVis)
+            for _, c in ipairs(win:GetChildren()) do
+                if c:IsA("GuiObject") and c ~= top then
+                    savedVis[c] = c.Visible
+                    c.Visible = false
+                end
+            end
+            win.Size = UDim2.new(0, 220, 0, 30)
+            minBtn.Text = "+"
+        else
+            win.Size = savedSize or UDim2.new(0, 390, 0, 300)
+            for c, v in pairs(savedVis) do if c.Parent then c.Visible = v end end
+            showTab(currentTab)
+            minBtn.Text = "–"
+        end
+    end)
+end
 
 do -- geser & ubah ukuran
     local dragging, dragStart, startPos
