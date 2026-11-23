@@ -6,7 +6,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 local __ok, __err = xpcall(function()
 local TITLE = "Ard Hub"
-local VERSION = "v1.9.3"
+local VERSION = "v1.9.4"
 local FOOTER = "Dragon Tower Defense | Ard Hub by Ardhi | " .. VERSION
 local ROOT_DIR = "ArdHub"
 local CONFIG_FILE = ROOT_DIR .. "/dtd_config.json"
@@ -2566,6 +2566,8 @@ local function mineWalkTo(id)
         table.insert(path, 1, cur)
         cur = R.prev[cur]
     end
+    -- di permukaan (mis. awal Mine, karakter masih di dekat spawn): jalan di atas tanah ke atas blok target
+    if stand == -1 and #path == 0 then path = { -1 } end
     local function pointOf(cell)
         if cell == -1 then return part.Position + Vector3.new(0, 5, 0) end
         return cellPos(cell, R.refId, R.refPos)
@@ -2579,11 +2581,12 @@ local function mineWalkTo(id)
             if flat <= 1.8 and math.abs(goal.Y - hrp.Position.Y) < 4.5 then break end
             hum:MoveTo(Vector3.new(goal.X, hrp.Position.Y, goal.Z))
             -- sel tujuan lebih tinggi, atau tertahan: lompat
-            if (goal.Y - hrp.Position.Y > 1.5 or os.clock() - w0 > 1.2) and os.clock() - lastJump > 0.6 then
+            local moving = hrp.AssemblyLinearVelocity.Magnitude > 4
+            if (goal.Y - hrp.Position.Y > 1.5 or (not moving and os.clock() - w0 > 1.2)) and os.clock() - lastJump > 0.6 then
                 hum.Jump = true
                 lastJump = os.clock()
             end
-            if os.clock() - w0 > 5 or os.clock() - t0 > 30 then return false end
+            if os.clock() - w0 > (cell == -1 and 25 or 5) or os.clock() - t0 > 45 then return false end
             task.wait(0.1)
         end
         if (hrp.Position - part.Position).Magnitude <= reachDist and not Mine.closeNeeded[id] then break end
