@@ -1,5 +1,5 @@
 --[[
-    Ard Hub Remote Spy  (v1.1.0)
+    Ard Hub Remote Spy  (v1.2.0)
     Mencatat remote di game mana pun, untuk membantu membuat script.
 
     - KELUAR (HP -> server): FireServer / InvokeServer, lewat hook yang hanya MENCATAT lalu meneruskan
@@ -7,10 +7,11 @@
     - MASUK (server -> HP): OnClientEvent, tanpa hook.
 
     Cara pakai:
-    - Ketuk satu baris, lalu tekan Salin: baris itu tersalin sebagai script siap pakai.
-      Keluar  -> script untuk mengirim remote itu dengan argumen yang sama.
-      Masuk   -> script untuk mendengarkan remote itu (OnClientEvent).
-    - Tanpa baris terpilih, Salin menyalin seluruh log.
+    - Ketuk satu baris, lalu tekan Salin: baris itu tersalin sebagai script siap pakai, LENGKAP dengan nilainya.
+      FIRE    -> script mengirim remote itu dengan argumen yang sama.
+      INVOKE  -> script mengirim remote itu + balasan server yang diterima saat direkam (Result).
+      Masuk   -> script mendengarkan remote itu + isi data lengkap yang dikirim server.
+    - Tanpa baris terpilih, Salin menyalin seluruh log (argumen + balasan setiap baris).
     - Tombol filter: Semua / Keluar / Masuk. Jeda: berhenti merekam sementara.
     - Remote yang sama yang terpanggil berturut-turut digabung jadi satu baris (xN), supaya log tidak penuh.
     - Log juga disimpan ke workspace/ArdHub/remote_spy.txt
@@ -179,12 +180,14 @@ local function makeScript(e)
         or ("local remote = nil -- remote \"" .. e.name .. "\" tidak berada di dalam game (parent nil)")
     local head = "-- Ard Hub Remote Spy · " .. e.kind .. " · " .. e.className .. " · " .. e.time
     if e.kind == "IN" then
-        local last = serArgs(e.args)
-        if #last > 300 then last = last:sub(1, 300) .. "..." end
+        local data = {}
+        for i = 1, e.args.n do data[i] = "    " .. code(e.args[i], "    ") .. "," end
         return table.concat({
             head,
-            "-- Data terakhir dari server: " .. last:gsub("\n", " "),
             remoteLine,
+            "-- Data terakhir yang dikirim server (" .. e.args.n .. " nilai):",
+            "local data = {\n" .. table.concat(data, "\n") .. "\n}",
+            "",
             "remote.OnClientEvent:Connect(function(...)",
             "    print(...)",
             "end)",
@@ -192,13 +195,26 @@ local function makeScript(e)
     end
     local lines = { head, remoteLine }
     local call = e.kind == "INVOKE" and "InvokeServer" or "FireServer"
+    local callText
     if e.args.n == 0 then
-        lines[#lines + 1] = "remote:" .. call .. "()"
+        callText = "remote:" .. call .. "()"
     else
         local items = {}
         for i = 1, e.args.n do items[i] = "    " .. code(e.args[i], "    ") .. "," end
         lines[#lines + 1] = "local args = {\n" .. table.concat(items, "\n") .. "\n}"
-        lines[#lines + 1] = "remote:" .. call .. "(unpack(args, 1, " .. e.args.n .. "))"
+        callText = "remote:" .. call .. "(unpack(args, 1, " .. e.args.n .. "))"
+    end
+    if call == "InvokeServer" then
+        lines[#lines + 1] = "local result = table.pack(" .. callText .. ")"
+        if e.results then
+            local items = {}
+            for i = 1, e.results.n do items[i] = "    " .. code(e.results[i], "    ") .. "," end
+            lines[#lines + 1] = "-- Balasan server saat direkam (" .. e.results.n .. " nilai):"
+            lines[#lines + 1] = "local expected = {\n" .. table.concat(items, "\n") .. "\n}"
+        end
+        lines[#lines + 1] = "print(unpack(result, 1, result.n))"
+    else
+        lines[#lines + 1] = callText
     end
     return table.concat(lines, "\n")
 end
@@ -292,7 +308,7 @@ local fontSize = 11
 local uiDirty, rebuild = true, false
 local queue = {}
 
-local function record(kind, remote, args)
+local function record(kind, remote, args, results)
     if not running or paused then return end
     local okN, name = pcall(function() return remote.Name end)
     if not okN or IGNORE[name] then return end
@@ -303,6 +319,7 @@ local function record(kind, remote, args)
         -- panggilan yang sama berturut-turut: digabung, isinya diganti yang terbaru
         last.count = last.count + 1
         last.args, last.argsText, last.time = args, argsText, os.date("%H:%M:%S")
+        last.results, last.resultText = results, results and serArgs(results) or nil
         last.script = nil
         last.dirty = true
     else
@@ -310,6 +327,7 @@ local function record(kind, remote, args)
         local e = {
             kind = kind, name = name, className = okC and cls or "?", remote = remote,
             args = args, argsText = argsText, time = os.date("%H:%M:%S"), count = 1,
+            results = results, resultText = results and serArgs(results) or nil,
         }
         entries[#entries + 1] = e
         queue[#queue + 1] = e
@@ -331,8 +349,12 @@ local function rowText(e)
     local kind = e.kind == "IN" and "IN    " or (e.kind == "FIRE" and "FIRE  " or "INVOKE")
     local args = e.argsText
     if #args > 400 then args = args:sub(1, 400) .. "..." end
-    return string.format('<font color="#6b6b78">[%s]</font> <font color="%s">%s</font> %s(%s)%s',
-        e.time, color, kind, esc(e.name), esc(args), e.count > 1 and (' <font color="#9696a5">x' .. e.count .. "</font>") or "")
+    local res = e.resultText
+    if res and #res > 200 then res = res:sub(1, 200) .. "..." end
+    return string.format('<font color="#6b6b78">[%s]</font> <font color="%s">%s</font> %s(%s)%s%s',
+        e.time, color, kind, esc(e.name), esc(args),
+        res and (' <font color="#FCD34D">→ ' .. esc(res) .. "</font>") or "",
+        e.count > 1 and (' <font color="#9696a5">x' .. e.count .. "</font>") or "")
 end
 local function matches(e)
     if e.kind == "---" then return true end
@@ -406,7 +428,8 @@ local function plainLog()
     local out = {}
     for _, e in ipairs(entries) do
         if matches(e) then
-            out[#out + 1] = string.format("[%s] %s %s(%s)%s", e.time, e.kind, e.name, e.argsText, e.count > 1 and (" x" .. e.count) or "")
+            out[#out + 1] = string.format("[%s] %s %s(%s)%s%s", e.time, e.kind, e.name, e.argsText,
+                e.resultText and (" -> " .. e.resultText) or "", e.count > 1 and (" x" .. e.count) or "")
         end
     end
     return table.concat(out, "\n")
@@ -430,6 +453,7 @@ local function saveLog()
         list[#list + 1] = {
             kind = e.kind, name = utf8safe(e.name), className = e.className, time = e.time,
             count = e.count, argsText = utf8safe(e.argsText), script = e.script and utf8safe(e.script) or nil,
+            resultText = e.resultText and utf8safe(e.resultText) or nil,
         }
     end
     pcall(function()
@@ -458,6 +482,7 @@ pcall(function()
             entries[#entries + 1] = {
                 kind = r.kind, name = tostring(r.name or "?"), className = tostring(r.className or "?"),
                 time = tostring(r.time or ""), count = tonumber(r.count) or 1, argsText = tostring(r.argsText or ""),
+                resultText = type(r.resultText) == "string" and r.resultText or nil,
                 script = type(r.script) == "string" and r.script or nil, restored = true,
             }
         end
@@ -591,14 +616,14 @@ end
 ---------------------------------------------------------------------
 local hookActive = false
 local lastOut = {}
-local function logOut(self, method, args)
+local function logOut(self, method, args, results)
     if not (hookActive and running) or paused or typeof(self) ~= "Instance" then return end
     -- satu panggilan bisa tertangkap dua hook sekaligus: catat sekali saja
     local key = tostring(self) .. method .. serArgs(args)
     local now = os.clock()
     if lastOut[key] and now - lastOut[key] < 0.05 then return end
     lastOut[key] = now
-    record(method == "InvokeServer" and "INVOKE" or "FIRE", self, args)
+    record(method == "InvokeServer" and "INVOKE" or "FIRE", self, args, results)
 end
 task.spawn(function() -- bersihkan catatan anti-dobel secara berkala
     while running do
@@ -615,7 +640,13 @@ if HOOK_OUTGOING and hookmetamethod and getnamecallmethod then
         oldNC = hookmetamethod(game, "__namecall", wrap(function(self, ...)
             if hookActive and not (checkcaller and checkcaller()) then
                 local method = getnamecallmethod()
-                if method == "FireServer" or method == "InvokeServer" then
+                if method == "InvokeServer" then
+                    -- balasan server disalin untuk log, lalu dikembalikan apa adanya
+                    local args = table.pack(...)
+                    local results = table.pack(oldNC(self, ...))
+                    task.spawn(logOut, self, method, args, results)
+                    return table.unpack(results, 1, results.n)
+                elseif method == "FireServer" then
                     task.spawn(logOut, self, method, table.pack(...))
                 end
             end
@@ -637,6 +668,12 @@ if HOOK_OUTGOING and hookmetamethod and getnamecallmethod then
                     local old
                     old = hookfunction(fn, wrap(function(self, ...)
                         if hookActive and not (checkcaller and checkcaller()) then
+                            if method == "InvokeServer" then
+                                local args = table.pack(...)
+                                local results = table.pack(old(self, ...))
+                                task.spawn(logOut, self, method, args, results)
+                                return table.unpack(results, 1, results.n)
+                            end
                             task.spawn(logOut, self, method, table.pack(...))
                         end
                         return old(self, ...)
